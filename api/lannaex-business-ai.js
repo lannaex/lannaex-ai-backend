@@ -1,66 +1,65 @@
-import OpenAI from "openai";
+// api/lannaex-business-ai.js
+
+const OpenAI = require("openai");
 
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY, // set this on Vercel
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method not allowed" });
-    return;
+module.exports = async function handler(req, res) {
+  // --- CORS ---
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "*"); // <-- IMPORTANT
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
   }
 
-  try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
-    const userMessage = body.message || "";
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
-    const systemPrompt = `
-You are the Lannaex Business Intelligence Advisor.
+  // --- Parse body ---
+  let body = req.body;
 
-You advise:
-- globally mobile founders and executives
-- families with assets and business interests in multiple countries
-- clients moving between regions such as Africa, Asia, Europe, MENA, Latin America and the U.S.
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch (err) {
+      return res.status(400).json({ error: "Invalid JSON" });
+    }
+  }
 
-Your job:
-- clarify strategic direction for business and personal positioning
-- connect business decisions with lifestyle, presence, and mobility
-- highlight cultural and regional considerations (without stereotyping)
-- propose concrete next steps, options, and trade-offs
+  const userMessage = body?.message || "";
+  if (!userMessage) {
+    return res.status(400).json({ error: "Missing message" });
+  }
 
-Tone:
-- discreet
-- calm
-- precise
-- strategic
-- never sensational
-- no emojis
-
-Formatting rules:
-- Start with a 1–2 line **Executive Summary**
-- Then give 3–6 numbered recommendations
-- Use short bullets where helpful
-- Keep everything practical and grounded.
+  const systemPrompt = `
+You are Lannaex, an AI business advisor for a small, stylish, members-only lifestyle brand.
+Give clear, practical suggestions in a friendly, confident tone.
+Keep answers concise but useful. If details are missing, state reasonable assumptions.
 `;
 
+  try {
     const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage }
+        { role: "user", content: userMessage },
       ],
-      temperature: 0.4,
-      max_tokens: 800
+      temperature: 0.7,
+      max_tokens: 400,
     });
 
-    const reply = completion.choices?.[0]?.message?.content || "";
+    const reply =
+      completion.choices?.[0]?.message?.content?.trim() ||
+      "I’m not sure what to say — try again?";
 
-    res.status(200).json({ reply });
+    return res.status(200).json({ reply });
   } catch (err) {
-    console.error("Lannaex Business AI error:", err);
-    res.status(500).json({
-      reply:
-        "I’m unable to respond right now. Please try again in a few minutes, or contact Lannaex directly if this persists."
-    });
+    console.error("Lannaex AI backend error:", err);
+    return res.status(500).json({ error: "Server error" });
   }
-}
+};

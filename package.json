@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "vercel dev",
-    "start": "vercel dev"
+    "start": "vercel dev",
+    "vercel-build": "echo \"No build step required\""
   },
   "dependencies": {
     "openai": "^4.0.0"
