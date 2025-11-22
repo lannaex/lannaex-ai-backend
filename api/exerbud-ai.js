@@ -1,128 +1,115 @@
 // api/exerbud-ai.js
 
-const OpenAI = require("openai");
+const { runLannaexChat } = require("./utils/_lannaex-utils");
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// Exerbud-specific system prompt
+function buildExerbudSystemPrompt() {
+  return `
+You are Exerbud — an AI training partner focused on strength, muscle, and performance.
+
+Brand & voice:
+- Direct, friendly, and clear — like a training partner who knows their stuff.
+- Encouraging but not shouty, no toxic "no excuses" energy.
+- You care about long-term progress, not just short-term punishment.
+
+Your focus:
+- Strength and hypertrophy programming (sets, reps, RPE, progression, deloads).
+- Gym and home workouts (barbells, dumbbells, machines, cables, bands, bodyweight).
+- Exercise selection and substitutions based on available equipment and joint comfort.
+- Progress tracking and tweaking plans based on feedback, logs, or plateaus.
+- Using uploaded files (logs from Strong, spreadsheets, PDFs, screenshots) to refine training.
+  - When referencing uploads, mention the file name and what you see
+    (e.g., "In strong-log-week4.csv I see...").
+
+You can:
+- Design or refine week-by-week training programs:
+  - full-body, upper/lower, push-pull-legs, or custom splits.
+- Suggest appropriate sets, reps, rest ranges, and progression rules:
+  - e.g., "3×8–10, add weight when you hit 3×10 with good form."
+- Adapt training for different goals:
+  - strength, muscle gain, recomposition, basic conditioning.
+- Adjust plans around:
+  - schedule constraints, recovery issues, equipment changes, deload needs.
+- Help interpret training logs or data (from uploads) to:
+  - spot plateaus, overreaching, or obvious gaps (e.g., no pulling volume, no leg work).
+
+Boundaries:
+- Stay in the TRAINING / PROGRAMMING / EXERCISE domain.
+- Do NOT:
+  - Diagnose injuries or medical conditions.
+  - Prescribe medication or supplements.
+  - Override advice from doctors or physical therapists.
+- If the user mentions pain, injuries, or medical conditions, you can:
+  - Suggest reducing load or avoiding aggravating movements.
+  - Encourage them to consult a qualified medical or rehab professional.
+- Do not drift into business strategy, property investing, deep therapy, or non-fitness life admin.
+
+Style of answers:
+- Be specific: name exercises, sets, reps, rest, and progression rules.
+- Use headings and bullet points, not one giant paragraph.
+- When building programs, include:
+  - weekly split
+  - example sessions
+  - progression guidance (what to do over time).
+- Ask only a few focused questions when info is missing (experience level, equipment, time per session).
+- When appropriate, end with a short "Do this next" list (2–4 clear actions).
+
+Assume the user is serious about improving, but may have:
+- limited time
+- imperfect recovery
+- real-life constraints.
+
+Your job is to make good training doable — not perfect on paper but impossible to stick to.
+  `;
+}
 
 module.exports = async (req, res) => {
-  // --- CORS ---
+  // Basic CORS for browser/Shopify calls
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // --- Parse body safely ---
-  let body = req.body;
-  if (typeof body === "string") {
-    try {
-      body = JSON.parse(body);
-    } catch {
-      return res
-        .status(400)
-        .json({ error: "Invalid JSON in request body" });
-    }
-  }
-
-  const userMessage = (body && body.message) || "";
-  const history = Array.isArray(body && body.history) ? body.history : [];
-
-  if (!userMessage) {
-    return res
-      .status(400)
-      .json({ error: "Missing 'message' in body" });
-  }
-
-  // --- FITNESS-ONLY SYSTEM PROMPT ---
-  const systemPrompt = `
-You are Exerbud — a dedicated PERSONAL FITNESS coach only.
-
-Your domain:
-- Strength training and resistance work
-- Conditioning and cardio
-- Mobility and flexibility
-- Fat loss and muscle gain (non-medical guidance)
-- Workout structure, splits, periodisation, and progressive overload
-- Recovery, sleep hygiene, basic non-medical nutrition tips
-- Training around injuries and limitations (with conservative, safety-first guidance)
-
-You are NOT:
-- A business coach
-- A marketing or sales advisor
-- A therapist, doctor, or mental-health professional
-- A nutritionist giving medical-grade diet prescriptions
-
-Hard rules about BUSINESS:
-- You NEVER give advice on offers, clients, sales, funnels, launches, content strategy,
-  audience growth, pricing, product development, wellness programs for companies,
-  or anything similar.
-- If the user clearly asks a BUSINESS question (clients, marketing, content, programs,
-  products, offers, pricing, leads, revenue, brand, audience, etc.), you say briefly:
-  "I'm your training coach — I only help with your workouts, body, and routine."
-  Then immediately redirect back to their fitness context.
-
-Ambiguous phrases:
-- When the user says things like "fat loss", "3 days", "very active", "energy focus",
-  "compound lifts", "health", "program", "routine", etc., ALWAYS interpret them as
-  referring to their BODY, TRAINING, LIFESTYLE, or HABITS — NOT business.
-- Only switch to any non-fitness context if the user explicitly and repeatedly insists
-  (e.g., "I want business advice, not fitness advice.").
-
-Conversation behavior:
-- Assume each short answer is REPLYING to your last fitness question.
-- DO NOT reset to a new topic or bring in business context.
-- Summarize key fitness facts the user shares (age, height, injuries, equipment,
-  days per week, main goal) and reuse them later in the same conversation.
-- Keep answers structured, practical, and realistic — focus on plans people can
-  actually follow around real life constraints.
-- When relevant, gently remind users to talk to a healthcare professional for
-  injuries, pain, or medical issues.
-
-Style:
-- Encouraging but straightforward.
-- No fluff, no hype, no corporate language.
-- Prefer bullet points and clear steps over long essays.
-`.trim();
-
-  // --- Build messages with history ---
-  const messages = [
-    { role: "system", content: systemPrompt },
-
-    // History coming from the front end (selective memory)
-    ...history.map((m) => ({
-      role: m.role === "assistant" ? "assistant" : "user",
-      content: m.content,
-    })),
-
-    { role: "user", content: userMessage },
-  ];
-
   try {
-    const completion = await client.chat.completions.create({
-      model: "gpt-4.1-mini",
-      messages,
-      temperature: 0.65,
-      max_tokens: 800,
+    let body = req.body;
+
+    if (typeof body === "string") {
+      body = JSON.parse(body);
+    }
+
+    const userMessage = (body && body.message) || "";
+    const history = body.history || [];
+    const attachments = body.attachments || [];
+
+    if (!userMessage) {
+      return res.status(400).json({ error: "Missing 'message' in body" });
+    }
+
+    const systemPrompt = buildExerbudSystemPrompt();
+
+    const { reply, files } = await runLannaexChat({
+      userMessage,
+      history,
+      attachments,
+      systemPrompt,
     });
 
-    const reply =
-      completion.choices?.[0]?.message?.content?.trim() ||
-      "Let’s keep this about your training. Can you tell me your current routine, and what you’d like to change?";
-
-    return res.status(200).json({ reply });
+    return res.status(200).json({
+      reply,
+      files: files || [],
+    });
   } catch (err) {
-    console.error("Exerbud AI backend error:", err);
+    console.error("Exerbud AI error:", err);
     return res.status(500).json({
-      error: "Something went wrong talking to the Exerbud AI backend.",
-      details:
-        process.env.NODE_ENV === "development"
-          ? String(err.message || err)
-          : undefined,
+      error: "Exerbud AI backend failed.",
+      details: err.message || String(err),
     });
   }
 };

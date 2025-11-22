@@ -8,6 +8,7 @@
     "vercel-build": "echo \"No build step required\""
   },
   "dependencies": {
-    "openai": "^4.0.0"
+    "@vercel/blob": "^2.0.0",
+    "openai": "^4.104.0"
   }
 }
