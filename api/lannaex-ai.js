@@ -1,8 +1,12 @@
 // api/lannaex-ai.js
+// Unified multimodal backend (matches Exerbud capabilities)
 
-const { runLannaexChat } = require("./utils/_lannaex-utils");
+const OpenAI = require("openai");
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// General Lannaex system prompt
+// -------------------------
+//  SYSTEM PROMPT
+// -------------------------
 function buildGeneralSystemPrompt() {
   return `
 You are Lannaex General AI — the front door to the Lannaex ecosystem.
@@ -37,49 +41,42 @@ Routing behavior:
   - Nervous system, sleep, routines, gentle habits → Lannaex Wellness AI
   - To-dos, birthdays, gifting, life organization → Lannaex Life Management AI
   - Buying vs renting, locations, ROI, renovation decisions → Lannaex Property AI
-- When suggesting a mode, keep it gentle and specific, for example:
-  - "We can keep going here, but if you want to go deeper on the workouts side,
-     Lannaex Fitness AI is built for that."
 
 Boundaries:
 - Do NOT give medical diagnoses, prescribe medications, or provide legal/tax advice.
-  - You can highlight topics to discuss with a professional.
-- Do NOT pretend to have real-time prices, availability, or local regulations — you can discuss typical ranges and questions to ask.
-- Avoid therapy-style deep psychological work. You can validate feelings in a light way,
-  but you are not a therapist.
+- Do NOT pretend to have real-time prices, availability, or local regulations.
+- Avoid therapy-style deep psychological work.
 
-Style of answers:
-- Start by briefly summarizing what the user is asking (1–2 sentences).
-- Then structure your response with short sections or bullet points.
-- When it’s helpful, end with a short "Next steps" list (2–4 concrete actions).
-- Ask only a few focused questions when more information is needed; don’t interrogate.
+Answer format:
+- Begin with a short summary (1–2 sentences).
+- Use short sections or bullet points.
+- End with a "Next steps" list when helpful.
+- Ask only 1–3 concise clarifying questions if needed.
   `;
 }
 
+// -------------------------
+//  API HANDLER
+// -------------------------
 module.exports = async (req, res) => {
-  // Basic CORS for Shopify/browser calls
+  // CORS for Shopify
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
+    // -------------------------
+    // Body parsing
+    // -------------------------
     let body = req.body;
+    if (typeof body === "string") body = JSON.parse(body);
 
-    if (typeof body === "string") {
-      body = JSON.parse(body);
-    }
-
-    const userMessage = (body && body.message) || "";
-    const history = body.history || [];
-    const attachments = body.attachments || [];
+    const userMessage = body.message;
+    const history = Array.isArray(body.history) ? body.history : [];
+    const attachments = Array.isArray(body.attachments) ? body.attachments : [];
 
     if (!userMessage) {
       return res.status(400).json({ error: "Missing 'message' in body" });
@@ -87,17 +84,60 @@ module.exports = async (req, res) => {
 
     const systemPrompt = buildGeneralSystemPrompt();
 
-    const { reply, files } = await runLannaexChat({
-      userMessage,
-      history,
-      attachments,
-      systemPrompt,
+    // -------------------------
+    // Build messages array
+    // -------------------------
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...history.map(m => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: m.content
+      }))
+    ];
+
+    // Build user message with attachments
+    const userContent = [{ type: "text", text: userMessage }];
+
+    // Add image/file uploads
+    for (const file of attachments) {
+      if (!file.data || !file.type) continue;
+      userContent.push({
+        type: "input_file",
+        mime_type: file.type,
+        data: file.data, // base64 string
+      });
+    }
+
+    messages.push({ role: "user", content: userContent });
+
+    // -------------------------
+    // OpenAI multimodal call
+    // -------------------------
+    const response = await client.responses.create({
+      model: "gpt-4.1", // full multimodal capability
+      messages,
+      max_output_tokens: 800,
+      temperature: 0.7,
     });
 
+    // Extract reply
+    let replyText = "";
+    if (response.output && Array.isArray(response.output[0].content)) {
+      const textPart = response.output[0].content.find(x => x.type === "output_text");
+      replyText = textPart?.text || "";
+    }
+
+    // Future extension: model can output files
+    const fileOutputs = [];
+
+    // -------------------------
+    // Return standard shape
+    // -------------------------
     return res.status(200).json({
-      reply,
-      files: files || [],
+      reply: replyText || "I’m here — tell me more and I’ll help you clarify.",
+      files: fileOutputs,
     });
+
   } catch (err) {
     console.error("Lannaex General AI error:", err);
     return res.status(500).json({

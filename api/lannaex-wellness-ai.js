@@ -1,6 +1,10 @@
 // api/lannaex-wellness-ai.js
 
-const { runLannaexChat } = require("./utils/_lannaex-utils");
+const OpenAI = require("openai");
+
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 // Wellness-specific system prompt
 function buildWellnessSystemPrompt() {
@@ -20,83 +24,152 @@ Your focus:
 - Helping the user prioritize: what matters now vs. what can wait.
 - Using uploaded files (logs, trackers, PDFs, notes, plans) to understand their patterns
   and reflect them back more clearly.
-  - When referencing uploads, mention the file name and what you see
-    (e.g., "In sleep-log-march.csv I see...").
+  - When referencing uploads, mention the file name and what you see.
 
 You can:
 - Suggest simple routines (morning, evening, pre-bed, pre-work) tailored to the user's life constraints.
-- Offer frameworks for calming the nervous system (breathing, pacing, boundaries, screen hygiene),
-  in a non-medical, non-therapeutic way.
-- Help the user structure experiments (e.g., "try this for 2 weeks and track X, Y, Z") so they can
-  learn what actually helps.
+- Offer frameworks for calming the nervous system in a non-medical way.
+- Help the user structure experiments (e.g., “try this for 2 weeks and track X, Y, Z”).
 - Turn scattered notes or data (from uploads) into clearer themes and 2–3 key focus areas.
 
 Boundaries:
 - Stay in the WELLNESS / LIFESTYLE / HABIT domain.
 - Do NOT:
-  - Diagnose conditions, prescribe medication, or replace medical or psychological care.
+  - Diagnose conditions, prescribe medication, or replace medical/psychological care.
   - Give specific medical treatment plans or supplement prescriptions.
-- If the user mentions serious symptoms, crises, or diagnoses, encourage them to speak with
-  a qualified professional and keep your guidance at the lifestyle/habit level.
-- Do not drift into business strategy, property analysis, or deep life admin — gently redirect
-  and suggest the appropriate Lannaex mode if they go there.
+- If the user mentions serious symptoms, crises, or diagnoses, suggest they speak with a qualified professional.
+- Do not drift into business, property, or deep life admin — redirect to other Lannaex modes when needed.
 
-Style of answers:
-- Use headings and bullet points; keep ideas easy to skim.
-- Emphasize "doable next steps" over perfection — e.g., 1–3 changes they can actually apply this week.
-- Avoid guilt-based framing; normalize that capacity changes and plans can be flexible.
-- When key information is missing (schedule, energy, constraints), ask 1–3 focused questions,
-  not a long intake form.
+Style:
+- Use headings and bullet points.
+- Emphasize “doable next steps” over perfection.
+- Ask 1–3 focused questions when key information is missing.
   `;
 }
 
 module.exports = async (req, res) => {
-  // Basic CORS for Shopify browser calls
+  // Basic CORS for Shopify/browser calls
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
     let body = req.body;
 
+    // Parse if body is a string (Shopify sometimes sends as string)
     if (typeof body === "string") {
-      body = JSON.parse(body);
+      try {
+        body = JSON.parse(body);
+      } catch {
+        return res.status(400).json({ error: "Invalid JSON" });
+      }
     }
 
-    const userMessage = (body && body.message) || "";
-    const history = body.history || [];
-    const attachments = body.attachments || [];
-
-    if (!userMessage) {
-      return res.status(400).json({ error: "Missing 'message' in body" });
+    if (!body || typeof body !== "object") {
+      return res.status(400).json({ error: "Body must be a JSON object" });
     }
+
+    const userMessage = (body.message || "").trim();
+    const history = Array.isArray(body.history) ? body.history : [];
+    const attachments = Array.isArray(body.attachments) ? body.attachments : [];
+
+    if (!userMessage) return res.status(400).json({ error: "Missing 'message' in body" });
 
     const systemPrompt = buildWellnessSystemPrompt();
 
-    const { reply, files } = await runLannaexChat({
-      userMessage,
-      history,
-      attachments,
-      systemPrompt,
+    // -------- Convert chat history --------
+    const historyMessages = history
+      .filter(m => m && typeof m.content === "string")
+      .map(m => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: [
+          {
+            type: "input_text",
+            text: m.content,
+          },
+        ],
+      }));
+
+    // -------- Build content for the new user message --------
+    const contentParts = [
+      {
+        type: "input_text",
+        text: userMessage,
+      },
+    ];
+
+    const nonImageSummaries = [];
+
+    attachments.forEach((att, idx) => {
+      if (!att || !att.data || !att.type) return;
+
+      const mime = String(att.type);
+      const name = att.name || `file-${idx + 1}`;
+
+      if (mime.startsWith("image/")) {
+        // Vision input
+        contentParts.push({
+          type: "input_image",
+          image_url: {
+            url: `data:${mime};base64,${att.data}`,
+          },
+        });
+      } else {
+        // Text, PDFs, logs, CSVs, etc → summarized for context
+        nonImageSummaries.push(`${name} (${mime}, ~${Math.round((att.size || 0) / 1024)} KB)`);
+      }
     });
 
-    return res.status(200).json({
-      reply,
-      files: files || [],
+    if (nonImageSummaries.length > 0) {
+      contentParts.push({
+        type: "input_text",
+        text:
+          "The user also uploaded these non-image files. Treat them as conceptual context only:\n" +
+          nonImageSummaries.map(x => "- " + x).join("\n"),
+      });
+    }
+
+    // -------- Call OpenAI Responses API --------
+    const response = await client.responses.create({
+      model: "gpt-4.1-mini",
+      max_output_tokens: 900,
+      temperature: 0.7,
+      input: [
+        {
+          role: "system",
+          content: [{ type: "input_text", text: systemPrompt }],
+        },
+        ...historyMessages,
+        {
+          role: "user",
+          content: contentParts,
+        },
+      ],
     });
+
+    // Extract final reply
+    let reply = "I’m here to help you feel more grounded — tell me what feels off right now.";
+    if (
+      response &&
+      Array.isArray(response.output) &&
+      response.output[0] &&
+      Array.isArray(response.output[0].content)
+    ) {
+      const node = response.output[0].content.find(c => c.type === "output_text");
+      if (node?.text?.value) reply = node.text.value.trim();
+    }
+
+    const files = []; // reserved for future wellness checklists / PDFs
+
+    return res.status(200).json({ reply, files });
   } catch (err) {
     console.error("Lannaex Wellness AI error:", err);
     return res.status(500).json({
       error: "Wellness AI backend failed.",
-      details: err.message || String(err),
+      details: process.env.NODE_ENV === "development" ? err.message : undefined,
     });
   }
 };

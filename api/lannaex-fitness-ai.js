@@ -1,8 +1,8 @@
 // api/lannaex-fitness-ai.js
 
-const { runLannaexChat } = require("./utils/_lannaex-utils");
+const OpenAI = require("openai");
 
-// Fitness-specific system prompt
+// Build Fitness system prompt
 function buildFitnessSystemPrompt() {
   return `
 You are Lannaex Fitness AI — a calm, smart training partner focused on sustainable strength, mobility, and conditioning.
@@ -13,86 +13,168 @@ Voice & tone:
 - Focused on what is realistic for the user's current life, schedule, and body.
 
 Your focus:
-- Strength training, gym routines, at-home setups, progression, and form cues (at a conceptual level).
-- Programming: sets, reps, split choices, deloads, progression strategies.
-- Mobility, warm-ups, and cool-down suggestions.
-- Adapting training to different environments (full gym, hotel gym, minimal equipment, bodyweight).
-- Helping the user build consistency rather than chase perfection.
+- Strength training, gym routines, at-home setups, progression, and form cues (concept-level).
+- Weekly programming: sets, reps, splits, deloads, progression.
+- Mobility, warm-ups, cool-downs.
+- Adapting training to gyms, hotel gyms, minimal equipment, or bodyweight.
+- Building consistency instead of perfection.
 
 You can:
-- Design or refine weekly training plans (full-body, upper/lower, push/pull/legs, etc.).
-- Adjust volume and intensity based on experience level, recovery, and goals.
-- Suggest substitutions if certain equipment or movements are not available.
-- Read and interpret uploaded files (e.g., workout logs, exported tracking spreadsheets, PDFs)
-  and use them to make more specific recommendations.
-  - When referencing uploads, mention the file name and what you see (e.g., "In strong-log-week3.csv...").
+- Build/refine weekly plans (full-body, upper/lower, push/pull/legs, etc.).
+- Adjust volume & intensity to experience, recovery, and goals.
+- Suggest substitutions for missing equipment.
+- Read & interpret uploaded files (workout logs, spreadsheets, PDFs)
+  and reference them by file name (e.g., "In strong-log-week3.csv I see…").
 
 Boundaries:
-- Stay in the FITNESS / TRAINING / MOVEMENT domain.
-- Do NOT give medical diagnoses, prescribe drugs, or override medical advice.
-  - If there are injuries, surgeries, or medical conditions, say you are not a doctor and recommend
-    they confirm plans with a qualified professional.
-- Do NOT drift into business strategy, property investment, life admin, or deep therapy-style mental health work.
-  - If the user moves into those areas, gently redirect and mention which other Lannaex mode might help.
+- Stay in FITNESS / TRAINING.
+- No medical diagnostics or prescriptions.
+- If injuries/conditions appear → remind user to consult a professional.
+- No drifting into business, property, or deep therapy.
 
-Style of answers:
-- Prefer clear structure: headings, bullets, short sections.
-- When building a plan, include at least:
-  - training split (which days, which focus)
-  - example exercises
-  - sets, reps, and progression idea (e.g., "add 2.5–5 kg when all sets feel smooth").
-- When information is missing (equipment, experience, time per session), ask 1–3 focused questions.
-- End with a short "Next steps" list when appropriate so the user knows exactly what to do next.
+Style:
+- Use headings & bullets.
+- Training plans must include:
+  - split structure
+  - exercises
+  - sets/reps
+  - progression logic
+- Ask 1–3 clarifying questions if key info is missing.
+- End with a short "Next Steps" list when helpful.
   `;
 }
 
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
 module.exports = async (req, res) => {
-  // Basic CORS for Shopify browser calls
+  // Basic CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
+  if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
     let body = req.body;
-
     if (typeof body === "string") {
-      body = JSON.parse(body);
+      try {
+        body = JSON.parse(body);
+      } catch {
+        return res.status(400).json({ error: "Invalid JSON" });
+      }
     }
 
-    const userMessage = (body && body.message) || "";
-    const history = body.history || [];
-    const attachments = body.attachments || [];
+    const userMessage = (body.message || "").trim();
+    const history = Array.isArray(body.history) ? body.history : [];
+    const attachments = Array.isArray(body.attachments) ? body.attachments : [];
 
     if (!userMessage) {
-      return res.status(400).json({ error: "Missing 'message' in body" });
+      return res.status(400).json({ error: "Missing 'message' field" });
     }
 
     const systemPrompt = buildFitnessSystemPrompt();
 
-    const { reply, files } = await runLannaexChat({
-      userMessage,
-      history,
-      attachments,
-      systemPrompt,
+    // ---------------- Convert history for Responses API ----------------
+    const historyMessages = history.map((h) => ({
+      role: h.role === "assistant" ? "assistant" : "user",
+      content: [
+        {
+          type: "input_text",
+          text: h.content,
+        },
+      ],
+    }));
+
+    // ---------------- Build content parts (text + files) ----------------
+    const contentParts = [
+      { type: "input_text", text: userMessage },
+    ];
+
+    const nonImageSummaries = [];
+
+    attachments.forEach((att, idx) => {
+      if (!att || !att.data || !att.type) return;
+
+      const mime = String(att.type);
+      const name = att.name || `file-${idx + 1}`;
+
+      if (mime.startsWith("image/")) {
+        // Vision support
+        contentParts.push({
+          type: "input_image",
+          image_url: {
+            url: `data:${mime};base64,${att.data}`,
+          },
+        });
+      } else {
+        // Non-image → summarize only (model cannot access raw content)
+        nonImageSummaries.push(
+          `${name} (${mime}, approx ${Math.round((att.size || 0) / 1024)} KB)`
+        );
+      }
     });
 
-    return res.status(200).json({
-      reply,
-      files: files || [],
+    if (nonImageSummaries.length > 0) {
+      contentParts.push({
+        type: "input_text",
+        text:
+          "The user also uploaded non-image files (you cannot see contents directly). Treat them as conceptual context:\n" +
+          nonImageSummaries.map((x) => "- " + x).join("\n"),
+      });
+    }
+
+    // ---------------- Call OpenAI Responses API ----------------
+    const response = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "system",
+          content: [{ type: "input_text", text: systemPrompt }],
+        },
+        ...historyMessages,
+        {
+          role: "user",
+          content: contentParts,
+        },
+      ],
+      max_output_tokens: 800,
+      temperature: 0.7,
     });
+
+    // ---------------- Extract output text ----------------
+    let reply =
+      "I’m not sure what to say yet — try asking with a little more detail.";
+
+    if (
+      response &&
+      Array.isArray(response.output) &&
+      response.output[0]?.content
+    ) {
+      const firstText = response.output[0].content.find(
+        (c) => c.type === "output_text"
+      );
+      if (firstText?.text?.value) {
+        reply = firstText.text.value.trim();
+      }
+    }
+
+    // Ready for future file exports
+    const files = [];
+
+    return res.status(200).json({ reply, files });
   } catch (err) {
-    console.error("Lannaex Fitness AI error:", err);
+    console.error("Lannaex Fitness AI backend error:", err);
     return res.status(500).json({
       error: "Fitness AI backend failed.",
-      details: err.message || String(err),
+      details:
+        process.env.NODE_ENV === "development"
+          ? err.message || String(err)
+          : undefined,
     });
   }
 };

@@ -1,6 +1,10 @@
 // api/lannaex-travel-ai.js
 
-const { runLannaexChat } = require("./utils/_lannaex-utils");
+const OpenAI = require("openai");
+
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 // Travel-specific system prompt
 function buildTravelSystemPrompt() {
@@ -19,11 +23,11 @@ Your focus:
 - Logistics: neighborhoods, transfer times, transport options, timing, seasonality, basic safety considerations.
 - Experiences: food, wellness, culture, light adventures, viewpoints, photo spots.
 - Using uploaded files (tickets, booking PDFs, screenshots, spreadsheets with dates) to refine plans.
-  - When referencing uploads, mention the file name and what you see (e.g., "In bangkok-trip-dates.pdf...").
+  - When referencing uploads, mention the file name and what you see.
 
 You can:
-- Build or refine itineraries for specific destinations (e.g., Bangkok, Chiang Mai, Bali, Dubai, Europe, etc.).
-- Suggest where to stay (by area/neighborhood and vibe, not only specific hotels when you lack live pricing).
+- Build or refine itineraries for specific destinations.
+- Suggest where to stay (by area/neighborhood and vibe, not just specific hotels when you lack live pricing).
 - Propose “light” days vs “full” days to avoid exhausting the traveler, especially for seniors or kids.
 - Adapt recommendations to dietary preferences (e.g., vegetarian, pescatarian, halal-friendly) based on user input.
 - Turn unstructured ideas or constraints into a simple travel plan with options.
@@ -31,9 +35,9 @@ You can:
 Boundaries:
 - Stay in the TRAVEL / TRIP PLANNING / LOGISTICS / EXPERIENCES domain.
 - Do NOT:
-  - Provide formal visa, immigration, tax, or legal advice. You can remind the user to check official sources.
-  - Guarantee live prices or availability; you can suggest types of places and typical ranges.
-  - Drift into deep medical advice or therapy; for health issues, gently recommend consulting a professional.
+  - Provide formal visa, immigration, tax, or legal advice. Remind users to check official sources.
+  - Guarantee live prices or availability; suggest types of places and typical ranges instead.
+  - Drift into deep medical advice or therapy; recommend consulting a professional for health issues.
 - If the user asks for business strategy, property decisions, deep wellness protocols, or life admin,
   gently redirect them to the relevant Lannaex mode.
 
@@ -67,12 +71,20 @@ module.exports = async (req, res) => {
     let body = req.body;
 
     if (typeof body === "string") {
-      body = JSON.parse(body);
+      try {
+        body = JSON.parse(body);
+      } catch {
+        return res.status(400).json({ error: "Invalid JSON in request body" });
+      }
     }
 
-    const userMessage = (body && body.message) || "";
-    const history = body.history || [];
-    const attachments = body.attachments || [];
+    if (!body || typeof body !== "object") {
+      return res.status(400).json({ error: "Body must be a JSON object" });
+    }
+
+    const userMessage = (body.message || "").trim();
+    const history = Array.isArray(body.history) ? body.history : [];
+    const attachments = Array.isArray(body.attachments) ? body.attachments : [];
 
     if (!userMessage) {
       return res.status(400).json({ error: "Missing 'message' in body" });
@@ -80,22 +92,107 @@ module.exports = async (req, res) => {
 
     const systemPrompt = buildTravelSystemPrompt();
 
-    const { reply, files } = await runLannaexChat({
-      userMessage,
-      history,
-      attachments,
-      systemPrompt,
+    // ----- Convert history into Responses API format -----
+    const historyMessages = history
+      .filter(h => h && typeof h.content === "string")
+      .map(h => ({
+        role: h.role === "assistant" ? "assistant" : "user",
+        content: [
+          {
+            type: "input_text",
+            text: h.content,
+          },
+        ],
+      }));
+
+    // ----- Build content parts for current user message -----
+    const contentParts = [
+      {
+        type: "input_text",
+        text: userMessage,
+      },
+    ];
+
+    const nonImageSummaries = [];
+
+    attachments.forEach((att, idx) => {
+      if (!att || !att.data || !att.type) return;
+
+      const mime = String(att.type);
+      const name = att.name || `file-${idx + 1}`;
+
+      if (mime.startsWith("image/")) {
+        // Image → vision input
+        contentParts.push({
+          type: "input_image",
+          image_url: {
+            url: `data:${mime};base64,${att.data}`,
+          },
+        });
+      } else {
+        // Non-image → summarise for model context
+        nonImageSummaries.push(
+          `${name} (${mime}, ~${Math.round((att.size || 0) / 1024)} KB)`
+        );
+      }
     });
 
-    return res.status(200).json({
-      reply,
-      files: files || [],
+    if (nonImageSummaries.length > 0) {
+      contentParts.push({
+        type: "input_text",
+        text:
+          "The user also uploaded these non-image files (you cannot see their raw contents; treat them as conceptual context):\n" +
+          nonImageSummaries.map(x => "- " + x).join("\n"),
+      });
+    }
+
+    // ----- Call OpenAI Responses API -----
+    const response = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "system",
+          content: [{ type: "input_text", text: systemPrompt }],
+        },
+        ...historyMessages,
+        {
+          role: "user",
+          content: contentParts,
+        },
+      ],
+      max_output_tokens: 900,
+      temperature: 0.7,
     });
+
+    // ----- Extract reply text -----
+    let reply =
+      "I’m here to help you shape your trip — tell me roughly when, where, and who is traveling.";
+
+    if (
+      response &&
+      Array.isArray(response.output) &&
+      response.output[0] &&
+      Array.isArray(response.output[0].content)
+    ) {
+      const textNode = response.output[0].content.find(
+        c => c.type === "output_text"
+      );
+      if (textNode?.text?.value) {
+        reply = textNode.text.value.trim();
+      }
+    }
+
+    const files = []; // reserved for future downloadable itineraries, etc.
+
+    return res.status(200).json({ reply, files });
   } catch (err) {
     console.error("Lannaex Travel AI error:", err);
     return res.status(500).json({
       error: "Travel AI backend failed.",
-      details: err.message || String(err),
+      details:
+        process.env.NODE_ENV === "development"
+          ? err.message || String(err)
+          : undefined,
     });
   }
 };
