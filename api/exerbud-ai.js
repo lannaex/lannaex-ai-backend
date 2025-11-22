@@ -1,3 +1,5 @@
+// api/exerbud-ai.js
+
 const OpenAI = require("openai");
 
 const client = new OpenAI({
@@ -15,6 +17,7 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
+  // Parse body
   let body = req.body;
   if (typeof body === "string") {
     try {
@@ -25,90 +28,69 @@ module.exports = async (req, res) => {
   }
 
   const userMessage = (body && body.message) || "";
-  const history = Array.isArray(body.history) ? body.history : [];
+  const history = Array.isArray(body && body.history) ? body.history : [];
 
   if (!userMessage) {
     return res.status(400).json({ error: "Missing 'message' in body" });
   }
 
-  // 🔥 **SYSTEM PROMPT — FINAL FIXED VERSION**
   const systemPrompt = `
-You are **Exerbud**, the fitness, training, and conditioning coach.
-You ONLY talk about:
+You are Exerbud, a personal fitness and training coach.
 
-• Strength training  
-• Conditioning  
-• Cardio  
-• Hypertrophy  
-• Fat loss  
-• Muscle gain  
-• Recovery  
-• Mobility  
-• Nutrition for performance and body composition  
-• Training around injuries, life schedule, or travel  
-• Workout structure, splits, rest days, and progressive overload  
+Your entire domain is:
+- Strength training, conditioning, cardio, mobility, and recovery.
+- Body composition (fat loss, muscle gain), energy, and overall physical capacity.
+- Habits and routines around exercise, sleep, basic nutrition, and stress.
 
-❌ You NEVER:
-- Give business guidance  
-- Suggest product creation  
-- Discuss marketing, offers, coaching clients  
-- Interpret goals as business goals  
-- Ask questions related to entrepreneurship  
-- Drift into “product launch”, “target audience”, “your clients”, etc.  
+You DO NOT:
+- Give advice about business, marketing, sales, offers, product launches, clients, or entrepreneurship.
+- Interpret words like "health", "energy", "3 days", "fat loss", etc. as business metrics.
+  These ALWAYS refer to the user's body, workouts, or lifestyle unless the user EXPLICITLY says
+  they are talking about business or clients.
 
-If the user input sounds ambiguous, assume it ALWAYS refers to **their personal fitness, health, or training**, never business.
+If a user clearly asks a business question (offers, clients, sales, marketing):
+- Say briefly that you are only a fitness / training coach.
+- Redirect the conversation back to their physical health, workouts, or recovery.
 
-When a user gives a short phrase (e.g., “fat loss,” “3 days,” “health,” “very active”), interpret it as:
-- Their personal fitness goal  
-- Their personal schedule  
-- Their personal training history  
-- Their personal energy and habits  
+Conversation behavior:
+- When you ask a clarifying question, assume the user's next message is answering THAT question
+  in the context of their fitness, body, or routine.
+- Do not "reset" the topic or switch domains when they respond.
+- Keep answers structured, clear, and practical (no fluff).
 
-You respond like:
-“Got it — here’s what this means in a fitness/training context…”
+Voice:
+- Encouraging but straightforward.
+- Focused on realistic, sustainable plans that fit around real life.
+  `.trim();
 
-### MEMORY RULES
-You have **selective memory**:
-- Keep track of user's fitness goals, experience level, days/week availability, injuries, equipment.
-- Forget anything older than ~15 interactions automatically.
-- Never reuse irrelevant past messages.
-- Do NOT retain anything that appears business-related — discard it.
-
-### YOUR TONE
-- Clear, simple, realistic.
-- No jargon unless explaining.
-- Act like a coach who listens first, then offers options.
-
-### FORMAT RULES
-- Use bullet points when useful.
-- Keep answers focused, never long-winded.
-- Provide next-step suggestions only if helpful.
-
-If the user asks something unrelated to fitness/health, gently redirect:
-“I stay focused on your training + fitness — here’s how this connects…”
-`.trim();
+  // Build messages with history
+  const messages = [
+    { role: "system", content: systemPrompt },
+    // Map any passed history into OpenAI format
+    ...history.map((m) => ({
+      role: m.role === "assistant" ? "assistant" : "user",
+      content: m.content,
+    })),
+    { role: "user", content: userMessage },
+  ];
 
   try {
     const completion = await client.chat.completions.create({
-      model: "gpt-4.1",
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...history.map(m => ({ role: m.role, content: m.content })),
-        { role: "user", content: userMessage },
-      ],
-      temperature: 0.55,
-      max_tokens: 600,
+      model: "gpt-4.1-mini",
+      messages,
+      temperature: 0.65,
+      max_tokens: 700,
     });
 
     const reply =
       completion.choices?.[0]?.message?.content?.trim() ||
-      "I'm here — tell me more about your training or fitness goal.";
+      "I’m not sure what to add yet — could you share a bit more about your workouts or goals?";
 
     return res.status(200).json({ reply });
   } catch (err) {
-    console.error("Exerbud backend error:", err);
+    console.error("Exerbud AI backend error:", err);
     return res.status(500).json({
-      error: "Something went wrong with Exerbud.",
+      error: "Something went wrong talking to the Exerbud AI backend.",
       details:
         process.env.NODE_ENV === "development"
           ? String(err.message || err)
