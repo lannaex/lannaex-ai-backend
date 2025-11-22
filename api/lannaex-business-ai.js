@@ -2,6 +2,7 @@
 
 const OpenAI = require("openai");
 const { buildBusinessSystemPrompt } = require("./utils/_lannaex-utils");
+const { webSearch, shouldUseSearch } = require("./utils/web-search");
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -13,9 +14,7 @@ module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
 
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -26,7 +25,7 @@ module.exports = async (req, res) => {
     if (typeof body === "string") {
       try {
         body = JSON.parse(body);
-      } catch (err) {
+      } catch {
         return res.status(400).json({ error: "Invalid JSON in body" });
       }
     }
@@ -43,15 +42,38 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: "Missing 'message' in body" });
     }
 
-    // Load correct Lannaex Business prompt
+    // -------------------------
+    // System prompt
+    // -------------------------
     const systemPrompt = buildBusinessSystemPrompt();
 
     // -------------------------
-    // Build history messages for Responses API
+    // Optional: Internet Search
+    // -------------------------
+    let finalUserMessage = userMessage;
+
+    if (shouldUseSearch(userMessage)) {
+      try {
+        const searchContext = await webSearch(userMessage);
+
+        if (searchContext) {
+          finalUserMessage =
+            userMessage +
+            "\n\n[Live web search results to use only as optional context:\n" +
+            searchContext +
+            "\n]";
+        }
+      } catch (err) {
+        console.error("Business AI Web Search Error:", err);
+      }
+    }
+
+    // -------------------------
+    // Build history for Responses API
     // -------------------------
     const historyMessages = history
-      .filter((h) => h && typeof h.content === "string")
-      .map((h) => ({
+      .filter(h => h && typeof h.content === "string")
+      .map(h => ({
         role: h.role === "assistant" ? "assistant" : "user",
         content: [
           {
@@ -62,13 +84,10 @@ module.exports = async (req, res) => {
       }));
 
     // -------------------------
-    // Build current user content (text + attachments)
+    // Build user content (text + attachments)
     // -------------------------
     const contentParts = [
-      {
-        type: "input_text",
-        text: userMessage,
-      },
+      { type: "input_text", text: finalUserMessage },
     ];
 
     const nonImageSummaries = [];
@@ -80,15 +99,11 @@ module.exports = async (req, res) => {
       const name = String(att.name || `file-${index + 1}`);
 
       if (mime.startsWith("image/")) {
-        // Vision: inline as data URL
         contentParts.push({
           type: "input_image",
-          image_url: {
-            url: `data:${mime};base64,${att.data}`,
-          },
+          image_url: { url: `data:${mime};base64,${att.data}` },
         });
       } else {
-        // Non-image: describe to model
         nonImageSummaries.push(
           `${name} (${mime}, ~${Math.round((att.size || 0) / 1024)} KB)`
         );
@@ -99,38 +114,30 @@ module.exports = async (req, res) => {
       contentParts.push({
         type: "input_text",
         text:
-          "The user also uploaded these non-image files (you cannot see their raw content, but you can reference them conceptually):\n" +
-          nonImageSummaries.map((s) => "- " + s).join("\n"),
+          "User also uploaded the following non-image files. You cannot see their raw content:\n" +
+          nonImageSummaries.map(s => "- " + s).join("\n"),
       });
     }
 
     // -------------------------
-    // Call OpenAI Responses API (multimodal)
+    // OpenAI call — multimodal Responses API
     // -------------------------
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
         {
           role: "system",
-          content: [
-            {
-              type: "input_text",
-              text: systemPrompt,
-            },
-          ],
+          content: [{ type: "input_text", text: systemPrompt }],
         },
         ...historyMessages,
-        {
-          role: "user",
-          content: contentParts,
-        },
+        { role: "user", content: contentParts },
       ],
       max_output_tokens: 800,
       temperature: 0.7,
     });
 
     // -------------------------
-    // Extract reply text
+    // Extract AI reply
     // -------------------------
     let reply =
       "I’m not sure what to say yet — try asking with a bit more detail about your business.";
@@ -141,25 +148,16 @@ module.exports = async (req, res) => {
       response.output[0] &&
       Array.isArray(response.output[0].content)
     ) {
-      const firstContent = response.output[0].content.find(
-        (c) => c.type === "output_text"
+      const contentObj = response.output[0].content.find(
+        c => c.type === "output_text"
       );
-      if (
-        firstContent &&
-        firstContent.text &&
-        typeof firstContent.text.value === "string"
-      ) {
-        reply = firstContent.text.value.trim();
+
+      if (contentObj?.text?.value) {
+        reply = contentObj.text.value.trim();
       }
     }
 
-    // For now, no backend-generated files yet → empty array
-    const files = [];
-
-    return res.status(200).json({
-      reply,
-      files,
-    });
+    return res.status(200).json({ reply, files: [] });
   } catch (err) {
     console.error("Lannaex Business AI backend error:", err);
     return res.status(500).json({

@@ -34,7 +34,6 @@ Output style:
 
 // Helper: build TXT + CSV from conversation
 function buildExports(history, userMessage, reply) {
-  // history comes from frontend as array of { role: 'user'|'assistant', content: string, ... }
   const full = [
     ...history
       .filter(m => m && typeof m.content === "string" && m.role)
@@ -52,7 +51,7 @@ function buildExports(history, userMessage, reply) {
   });
   const txtContent = textLines.join("\n\n------------------------\n\n");
 
-  // CSV (role, content)
+  // CSV
   const esc = (s) =>
     `"${String(s).replace(/"/g, '""').replace(/\n/g, "\\n").replace(/\r/g, "")}"`;
 
@@ -171,9 +170,10 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // -------- Call Responses API --------
+    // -------- Call Responses API with web search enabled --------
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
+      tools: [{ type: "web_search" }],   // ✅ enables internet search
       input: [
         {
           role: "system",

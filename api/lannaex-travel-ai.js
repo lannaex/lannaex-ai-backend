@@ -1,6 +1,7 @@
 // api/lannaex-travel-ai.js
 
 const OpenAI = require("openai");
+const { webSearch, shouldUseSearch } = require("./utils/web-search");
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -82,15 +83,36 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: "Body must be a JSON object" });
     }
 
-    const userMessage = (body.message || "").trim();
+    const rawMessage = (body.message || "").trim();
     const history = Array.isArray(body.history) ? body.history : [];
     const attachments = Array.isArray(body.attachments) ? body.attachments : [];
 
-    if (!userMessage) {
+    if (!rawMessage) {
       return res.status(400).json({ error: "Missing 'message' in body" });
     }
 
     const systemPrompt = buildTravelSystemPrompt();
+
+    // ---------------------------------
+    // INTERNET SEARCH INJECTION
+    // ---------------------------------
+    let userMessage = rawMessage;
+
+    if (shouldUseSearch(rawMessage)) {
+      try {
+        const searchResults = await webSearch(rawMessage);
+        if (searchResults) {
+          userMessage =
+            rawMessage +
+            "\n\n[Live web search results for context — use only if helpful and ignore if outdated or irrelevant:\n" +
+            searchResults +
+            "\n]";
+        }
+      } catch (searchErr) {
+        console.error("Lannaex Travel AI web search error:", searchErr);
+        // fail open: just continue without search enrichment
+      }
+    }
 
     // ----- Convert history into Responses API format -----
     const historyMessages = history

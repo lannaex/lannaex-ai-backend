@@ -1,6 +1,7 @@
 // api/lannaex-life-management-ai.js
 
 const OpenAI = require("openai");
+const { webSearch, shouldUseSearch } = require("./utils/web-search");
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -76,12 +77,30 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: "Body must be a JSON object" });
     }
 
-    const userMessage = (body.message || "").trim();
+    const rawMessage = (body.message || "").trim();
     const history = Array.isArray(body.history) ? body.history : [];
     const attachments = Array.isArray(body.attachments) ? body.attachments : [];
 
-    if (!userMessage) {
+    if (!rawMessage) {
       return res.status(400).json({ error: "Missing 'message' in body" });
+    }
+
+    // ------------- Internet search enrichment -------------
+    let userMessage = rawMessage;
+    if (shouldUseSearch(rawMessage)) {
+      try {
+        const searchResults = await webSearch(rawMessage);
+        if (searchResults) {
+          userMessage =
+            rawMessage +
+            "\n\n[Live web search results for context — use only if helpful:\n" +
+            searchResults +
+            "\n]";
+        }
+      } catch (err) {
+        console.error("Life Management AI web search error:", err);
+        // If search fails, we just fall back to the raw message
+      }
     }
 
     const systemPrompt = buildLifeManagementSystemPrompt();

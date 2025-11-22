@@ -1,6 +1,7 @@
 // api/lannaex-property-ai.js
 
 const OpenAI = require("openai");
+const { webSearch, shouldUseSearch } = require("./utils/web-search");
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -18,27 +19,25 @@ Voice & tone:
 
 Your focus:
 - Residential property decisions: buying, selling, renting, house-hacking, and using properties for lifestyle + income.
-- Evaluating locations, neighborhoods, and use cases (personal use, long-term rental, mid-term, short-term).
-- Rough financial analysis: cash flow, simple ROI, yield, basic scenario comparisons (not formal financial advice).
-- Renovation and furnishing decisions framed in terms of cost vs. benefit, impact on rentability, and resale.
-- Using uploaded files (spreadsheets, listings, PDFs, screenshots) to inform your analysis.
-  - When referencing uploads, mention file names and what you observe.
+- Evaluating locations, neighborhoods, and use cases.
+- Rough financial analysis: cash flow, ROI, yield, simple scenario comparisons.
+- Renovation and furnishing decisions in terms of cost vs benefit and impact on rentability/resale.
+- Using uploaded files (spreadsheets, listings, PDFs, screenshots).
 
 Boundaries:
-- Stay in PROPERTY / REAL ESTATE DECISION-MAKING.
-- Do NOT give tax, legal, or formal financial advice.
-- Do NOT guarantee market predictions.
-- If the user enters unrelated domains (business, therapy, medical, etc.), redirect to the right Lannaex mode.
+- Stay in PROPERTY / REAL ESTATE.
+- No tax, legal, or formal financial advice.
+- No guaranteed market predictions.
 
-Style of answers:
-- Use clear headings and bullet points.
-- Present simple scenario comparisons.
-- When appropriate, end with “What I’d do next” (2–4 concrete steps).
+Style:
+- Clear headings + bullet points.
+- Scenario comparisons.
+- Finish with “What I’d do next” (2–4 steps).
   `;
 }
 
 module.exports = async (req, res) => {
-  // Basic CORS for browser calls
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -63,17 +62,39 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: "Body must be a JSON object" });
     }
 
-    const userMessage = (body.message || "").trim();
+    const rawMessage = (body.message || "").trim();
     const history = Array.isArray(body.history) ? body.history : [];
     const attachments = Array.isArray(body.attachments) ? body.attachments : [];
 
-    if (!userMessage) {
+    if (!rawMessage) {
       return res.status(400).json({ error: "Missing 'message' in body" });
     }
 
     const systemPrompt = buildPropertySystemPrompt();
 
-    // --- Convert history to Responses API format ---
+    // ------------------------------------------------------
+    // INTERNET SEARCH (same pattern as Business & Fashion)
+    // ------------------------------------------------------
+    let userMessage = rawMessage;
+
+    if (shouldUseSearch(rawMessage)) {
+      try {
+        const searchResults = await webSearch(rawMessage);
+        if (searchResults) {
+          userMessage =
+            rawMessage +
+            "\n\n[Live web search results for context — use only if helpful:\n" +
+            searchResults +
+            "\n]";
+        }
+      } catch (searchErr) {
+        console.error("Property AI web search error:", searchErr);
+      }
+    }
+
+    // ------------------------------------------------------
+    // Convert history for Responses API (multimodal-safe)
+    // ------------------------------------------------------
     const historyMessages = history
       .filter(h => h && typeof h.content === "string")
       .map(h => ({
@@ -86,7 +107,9 @@ module.exports = async (req, res) => {
         ],
       }));
 
-    // --- Build content parts for user message ---
+    // ------------------------------------------------------
+    // Build content parts (user text + file attachments)
+    // ------------------------------------------------------
     const contentParts = [
       {
         type: "input_text",
@@ -99,11 +122,11 @@ module.exports = async (req, res) => {
     attachments.forEach((att, idx) => {
       if (!att || !att.data || !att.type) return;
 
-      const mime = String(att.type);
+      const mime = att.type + "";
       const name = att.name || `file-${idx + 1}`;
 
       if (mime.startsWith("image/")) {
-        // Vision — embed as Base64 image
+        // Vision
         contentParts.push({
           type: "input_image",
           image_url: {
@@ -111,7 +134,6 @@ module.exports = async (req, res) => {
           },
         });
       } else {
-        // Non-image — summarize
         nonImageSummaries.push(
           `${name} (${mime}, ~${Math.round((att.size || 0) / 1024)} KB)`
         );
@@ -122,12 +144,14 @@ module.exports = async (req, res) => {
       contentParts.push({
         type: "input_text",
         text:
-          "The user also uploaded these non-image files (contents not visible):\n" +
-          nonImageSummaries.map(x => "- " + x).join("\n"),
+          "User also uploaded these non-image files (contents not visible):\n" +
+          nonImageSummaries.map(f => "- " + f).join("\n"),
       });
     }
 
-    // --- OpenAI Responses API call ---
+    // ------------------------------------------------------
+    // OPENAI — Responses API
+    // ------------------------------------------------------
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
@@ -141,31 +165,26 @@ module.exports = async (req, res) => {
           content: contentParts,
         },
       ],
-      max_output_tokens: 800,
+      max_output_tokens: 900,
       temperature: 0.6,
     });
 
-    // --- Extract output ---
+    // ------------------------------------------------------
+    // Extract final text
+    // ------------------------------------------------------
     let reply =
-      "I’m here to help you analyze your property situation — tell me what you’re comparing.";
+      "Tell me what properties or scenarios you're comparing and I’ll help you analyze them.";
 
-    if (
-      response &&
-      Array.isArray(response.output) &&
-      response.output[0] &&
-      Array.isArray(response.output[0].content)
-    ) {
-      const textNode = response.output[0].content.find(
+    if (response?.output?.[0]?.content) {
+      const node = response.output[0].content.find(
         c => c.type === "output_text"
       );
-      if (textNode?.text?.value) {
-        reply = textNode.text.value.trim();
+      if (node?.text?.value) {
+        reply = node.text.value.trim();
       }
     }
 
-    const files = []; // reserved for future downloadable outputs
-
-    return res.status(200).json({ reply, files });
+    return res.status(200).json({ reply, files: [] });
   } catch (err) {
     console.error("Lannaex Property AI error:", err);
     return res.status(500).json({

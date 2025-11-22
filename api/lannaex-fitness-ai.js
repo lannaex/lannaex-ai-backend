@@ -1,6 +1,7 @@
 // api/lannaex-fitness-ai.js
 
 const OpenAI = require("openai");
+const { webSearch, shouldUseSearch } = require("./utils/web-search");
 
 // Build Fitness system prompt
 function buildFitnessSystemPrompt() {
@@ -24,7 +25,7 @@ You can:
 - Adjust volume & intensity to experience, recovery, and goals.
 - Suggest substitutions for missing equipment.
 - Read & interpret uploaded files (workout logs, spreadsheets, PDFs)
-  and reference them by file name (e.g., "In strong-log-week3.csv I see…").
+  and reference them by file name.
 
 Boundaries:
 - Stay in FITNESS / TRAINING.
@@ -34,13 +35,9 @@ Boundaries:
 
 Style:
 - Use headings & bullets.
-- Training plans must include:
-  - split structure
-  - exercises
-  - sets/reps
-  - progression logic
-- Ask 1–3 clarifying questions if key info is missing.
-- End with a short "Next Steps" list when helpful.
+- Plans must include split, exercises, sets/reps, and progression logic.
+- Ask 1–3 clarifying questions if needed.
+- End with “Next Steps” when helpful.
   `;
 }
 
@@ -69,50 +66,59 @@ module.exports = async (req, res) => {
       }
     }
 
-    const userMessage = (body.message || "").trim();
+    const rawMessage = (body.message || "").trim();
     const history = Array.isArray(body.history) ? body.history : [];
     const attachments = Array.isArray(body.attachments) ? body.attachments : [];
 
-    if (!userMessage) {
+    if (!rawMessage) {
       return res.status(400).json({ error: "Missing 'message' field" });
+    }
+
+    // -------------------------
+    // INTERNET SEARCH
+    // -------------------------
+    let userMessage = rawMessage;
+
+    if (shouldUseSearch(rawMessage)) {
+      try {
+        const searchResults = await webSearch(rawMessage);
+        if (searchResults) {
+          userMessage =
+            rawMessage +
+            "\n\n[Live web search results for context — use only if helpful:\n" +
+            searchResults +
+            "\n]";
+        }
+      } catch (err) {
+        console.error("Fitness AI web search error:", err);
+      }
     }
 
     const systemPrompt = buildFitnessSystemPrompt();
 
-    // ---------------- Convert history for Responses API ----------------
+    // ---------------- Convert history ----------------
     const historyMessages = history.map((h) => ({
       role: h.role === "assistant" ? "assistant" : "user",
-      content: [
-        {
-          type: "input_text",
-          text: h.content,
-        },
-      ],
+      content: [{ type: "input_text", text: h.content }],
     }));
 
-    // ---------------- Build content parts (text + files) ----------------
-    const contentParts = [
-      { type: "input_text", text: userMessage },
-    ];
+    // ---------------- Build content parts ----------------
+    const contentParts = [{ type: "input_text", text: userMessage }];
 
     const nonImageSummaries = [];
 
     attachments.forEach((att, idx) => {
       if (!att || !att.data || !att.type) return;
 
-      const mime = String(att.type);
+      const mime = att.type;
       const name = att.name || `file-${idx + 1}`;
 
       if (mime.startsWith("image/")) {
-        // Vision support
         contentParts.push({
           type: "input_image",
-          image_url: {
-            url: `data:${mime};base64,${att.data}`,
-          },
+          image_url: { url: `data:${mime};base64,${att.data}` },
         });
       } else {
-        // Non-image → summarize only (model cannot access raw content)
         nonImageSummaries.push(
           `${name} (${mime}, approx ${Math.round((att.size || 0) / 1024)} KB)`
         );
@@ -123,7 +129,7 @@ module.exports = async (req, res) => {
       contentParts.push({
         type: "input_text",
         text:
-          "The user also uploaded non-image files (you cannot see contents directly). Treat them as conceptual context:\n" +
+          "The user uploaded non-image files (contents not visible). Treat them conceptually:\n" +
           nonImageSummaries.map((x) => "- " + x).join("\n"),
       });
     }
@@ -132,41 +138,24 @@ module.exports = async (req, res) => {
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
-        {
-          role: "system",
-          content: [{ type: "input_text", text: systemPrompt }],
-        },
+        { role: "system", content: [{ type: "input_text", text: systemPrompt }] },
         ...historyMessages,
-        {
-          role: "user",
-          content: contentParts,
-        },
+        { role: "user", content: contentParts },
       ],
       max_output_tokens: 800,
       temperature: 0.7,
     });
 
-    // ---------------- Extract output text ----------------
+    // ---------------- Extract output ----------------
     let reply =
       "I’m not sure what to say yet — try asking with a little more detail.";
 
-    if (
-      response &&
-      Array.isArray(response.output) &&
-      response.output[0]?.content
-    ) {
-      const firstText = response.output[0].content.find(
-        (c) => c.type === "output_text"
-      );
-      if (firstText?.text?.value) {
-        reply = firstText.text.value.trim();
-      }
+    if (response?.output?.[0]?.content) {
+      const out = response.output[0].content.find((c) => c.type === "output_text");
+      if (out?.text?.value) reply = out.text.value.trim();
     }
 
-    // Ready for future file exports
-    const files = [];
-
-    return res.status(200).json({ reply, files });
+    return res.status(200).json({ reply, files: [] });
   } catch (err) {
     console.error("Lannaex Fitness AI backend error:", err);
     return res.status(500).json({

@@ -1,7 +1,7 @@
 // api/lannaex-fashion-ai.js
 
 const OpenAI = require("openai");
-const { runLannaexChat } = require("./utils/_lannaex-utils");
+const { webSearch, shouldUseSearch } = require("./utils/web-search");
 
 // Build Fashion prompt directly here (matches your original)
 function buildFashionSystemPrompt() {
@@ -68,28 +68,49 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: "Body must be an object" });
     }
 
-    const userMessage = (body.message || "").trim();
+    const rawMessage = (body.message || "").trim();
     const history = Array.isArray(body.history) ? body.history : [];
     const attachments = Array.isArray(body.attachments) ? body.attachments : [];
 
-    if (!userMessage) {
+    if (!rawMessage) {
       return res.status(400).json({ error: "Missing 'message' field" });
     }
 
     const systemPrompt = buildFashionSystemPrompt();
 
-    // -------- Convert history for Responses API --------
-    const historyMessages = history.map((h) => ({
-      role: h.role === "assistant" ? "assistant" : "user",
-      content: [
-        {
-          type: "input_text",
-          text: h.content,
-        },
-      ],
-    }));
+    // ---------- Optional Internet Search ----------
+    let userMessage = rawMessage;
 
-    // -------- Build content parts (text + files) --------
+    if (shouldUseSearch(rawMessage)) {
+      try {
+        const searchContext = await webSearch(rawMessage);
+        if (searchContext) {
+          userMessage =
+            rawMessage +
+            "\n\n[Live web search results for additional context (use only if helpful):\n" +
+            searchContext +
+            "\n]";
+        }
+      } catch (err) {
+        console.error("Lannaex Fashion AI web search error:", err);
+        // Fail-soft: continue without search context
+      }
+    }
+
+    // ---------- Convert history for Responses API ----------
+    const historyMessages = history
+      .filter(h => h && typeof h.content === "string")
+      .map(h => ({
+        role: h.role === "assistant" ? "assistant" : "user",
+        content: [
+          {
+            type: "input_text",
+            text: h.content,
+          },
+        ],
+      }));
+
+    // ---------- Build content parts (text + files) ----------
     const contentParts = [
       {
         type: "input_text",
@@ -126,11 +147,11 @@ module.exports = async (req, res) => {
         type: "input_text",
         text:
           "The user also uploaded these non-image files (you cannot see their raw content, but you may reference them conceptually):\n" +
-          nonImageSummaries.map((x) => "- " + x).join("\n"),
+          nonImageSummaries.map(x => "- " + x).join("\n"),
       });
     }
 
-    // -------- Call OpenAI Responses API --------
+    // ---------- Call OpenAI Responses API ----------
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
@@ -148,7 +169,7 @@ module.exports = async (req, res) => {
       temperature: 0.7,
     });
 
-    // -------- Extract reply text --------
+    // ---------- Extract reply text ----------
     let reply = "I’m not sure what to say yet — try asking with a bit more detail.";
 
     if (
@@ -157,14 +178,14 @@ module.exports = async (req, res) => {
       response.output[0]?.content
     ) {
       const firstText = response.output[0].content.find(
-        (c) => c.type === "output_text"
+        c => c.type === "output_text"
       );
       if (firstText?.text?.value) {
         reply = firstText.text.value.trim();
       }
     }
 
-    // No file generation yet → return empty array
+    // No backend-generated files yet → return empty array
     const files = [];
 
     return res.status(200).json({ reply, files });
