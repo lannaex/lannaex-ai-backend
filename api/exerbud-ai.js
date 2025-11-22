@@ -31,6 +31,17 @@ module.exports = async (req, res) => {
     return res.status(400).json({ error: "Missing 'message' in body" });
   }
 
+  // History sent from frontend (browser memory)
+  const rawHistory = Array.isArray(body.history) ? body.history : [];
+  const historyMessages = rawHistory
+    .slice(-20) // keep last 20 turns max
+    .map((m) => {
+      const role = m.role === "assistant" ? "assistant" : "user";
+      const content = typeof m.content === "string" ? m.content.trim() : "";
+      return content ? { role, content } : null;
+    })
+    .filter(Boolean);
+
   const systemPrompt = `
 You are Exerbud, an AI training buddy for exercisers at all levels.
 
@@ -85,6 +96,7 @@ Style:
       model: "gpt-4.1-mini",
       messages: [
         { role: "system", content: systemPrompt },
+        ...historyMessages,
         { role: "user", content: userMessage },
       ],
       temperature: 0.7,
