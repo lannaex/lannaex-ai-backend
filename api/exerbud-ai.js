@@ -18,29 +18,31 @@ Tone:
 - Grounded and practical, no bro-science.
 - Respect people’s actual lives, schedules, stress, and recovery.
 
-Capabilities:
+You can:
 - Build and adjust workout plans (gym, home, travel, limited equipment).
 - Suggest sustainable programming (not extreme).
 - Help with exercise selection, sets/reps, weekly splits, progression, deloads.
-- Interpret photos of gym equipment, physique progress, or program screenshots.
-- Use uploaded files as context:
-  - Images → describe what you see and use it to tailor advice.
-  - Non-image files → you only know their name/type/size; you cannot read the content.
+- Give form cues at a conceptual level (not detailed medical diagnostics).
+- Adapt training around injuries or limitations, but always advise medical clearance.
 
 Limitations:
-- You do NOT have live internet or map access.
-- If a user asks things like "find a gym near me" or "what’s the address / price right now":
-  - Be explicit that you can’t look up specific locations or live data.
-  - Instead, explain what to look for, how to evaluate options, and how they can search on their own
-    (e.g., “search for ‘24/7 strength gym + [their area]’”).
+- You do NOT have live internet or maps.
+- If the user asks for real-time data (e.g., “find a gym near me”, prices, schedules):
+  - Say clearly you can’t look it up.
+  - Help them decide what to search for and what criteria to use.
 - You do NOT diagnose injuries or medical issues and never prescribe drugs.
   - If something sounds serious, advise them to see a qualified professional.
 
 Output style:
 - Start with 1–2 sentences reflecting what you understood.
-- Then give structured guidance with headings and bullet points.
-- End with 2–4 clear "Next steps" so the user knows exactly what to do.
-  `.trim();
+- Then use clear headings and bullet points.
+- When giving plans, include:
+  - split (e.g., full-body 3x/week)
+  - exercises
+  - sets/reps
+  - progression notes
+- End with 2–4 concrete "Next steps" so the user knows exactly what to do.
+`.trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -65,144 +67,85 @@ module.exports = async (req, res) => {
   if (typeof body === "string") {
     try {
       body = JSON.parse(body);
-    } catch (err) {
-      return res.status(400).json({ reply: "Invalid JSON in request body", error: "Invalid JSON" });
+    } catch {
+      return res.status(400).json({ error: "Invalid JSON in request body" });
     }
   }
 
   if (!body || typeof body !== "object") {
-    return res.status(400).json({
-      reply: "Body must be a JSON object.",
-      error: "Body must be a JSON object",
-    });
+    return res.status(400).json({ error: "Request body must be a JSON object" });
   }
 
   const userMessage = (body.message || "").trim();
   const history = Array.isArray(body.history) ? body.history : [];
-  const attachments = Array.isArray(body.attachments) ? body.attachments : [];
 
   if (!userMessage) {
-    return res.status(400).json({
-      reply: "Missing 'message' in body.",
-      error: "Missing 'message' in body",
-    });
+    return res.status(400).json({ error: "Missing 'message' in body" });
   }
 
   const systemPrompt = buildExerbudSystemPrompt();
 
-  // ---------- Convert history to Responses API format ----------
-  const historyMessages = history
-    .filter((h) => h && typeof h.content === "string")
-    .map((h) => ({
-      role: h.role === "assistant" ? "assistant" : "user",
-      content: [
-        {
-          type: "input_text",
-          text: h.content,
-        },
-      ],
-    }));
-
-  // ---------- Build current user content (text + attachments) ----------
-  const contentParts = [
+  // ---------- Build chat messages for Chat Completions ----------
+  const messages = [
     {
-      type: "input_text",
-      text: userMessage,
+      role: "system",
+      content: systemPrompt,
     },
   ];
 
-  const nonImageSummaries = [];
+  // keep only the last ~20 messages from history for context
+  const trimmedHistory = history.slice(-20);
 
-  attachments.forEach((att, index) => {
-    if (!att || !att.data || !att.type) return;
+  trimmedHistory.forEach((m) => {
+    if (!m || typeof m.content !== "string") return;
 
-    const mime = String(att.type);
-    const name = String(att.name || `file-${index + 1}`);
+    const role =
+      m.role === "assistant" || m.role === "Assistant" ? "assistant" : "user";
 
-    if (mime.startsWith("image/")) {
-      contentParts.push({
-        type: "input_image",
-        image_url: {
-          url: `data:${mime};base64,${att.data}`,
-        },
-      });
-    } else {
-      nonImageSummaries.push(
-        `${name} (${mime}, ~${Math.round((att.size || 0) / 1024)} KB)`
-      );
-    }
+    messages.push({
+      role,
+      content: m.content,
+    });
   });
 
-  if (nonImageSummaries.length > 0) {
-    contentParts.push({
-      type: "input_text",
-      text:
-        "The user also uploaded these non-image files. " +
-        "You cannot read their contents; treat them only as conceptual context:\n" +
-        nonImageSummaries.map((s) => "- " + s).join("\n"),
-    });
-  }
+  // Current user message
+  messages.push({
+    role: "user",
+    content: userMessage,
+  });
 
   try {
-    // ---------- Call OpenAI Responses API ----------
-    const response = await client.responses.create({
+    // ---------- Call Chat Completions API ----------
+    const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
-      input: [
-        {
-          role: "system",
-          content: [{ type: "input_text", text: systemPrompt }],
-        },
-        ...historyMessages,
-        {
-          role: "user",
-          content: contentParts,
-        },
-      ],
-      max_output_tokens: 900,
+      messages,
       temperature: 0.7,
+      max_tokens: 800,
     });
 
-    // ---------- Extract reply ----------
     let reply =
       "I’m not sure what to say yet — try asking again with a bit more detail about your training.";
 
     if (
-      response &&
-      Array.isArray(response.output) &&
-      response.output[0] &&
-      Array.isArray(response.output[0].content)
+      completion &&
+      completion.choices &&
+      completion.choices[0] &&
+      completion.choices[0].message &&
+      typeof completion.choices[0].message.content === "string"
     ) {
-      const textNode = response.output[0].content.find(
-        (c) => c.type === "output_text"
-      );
-      if (
-        textNode &&
-        textNode.text &&
-        typeof textNode.text.value === "string"
-      ) {
-        reply = textNode.text.value.trim();
-      }
+      reply = completion.choices[0].message.content.trim();
     }
 
+    // Frontend expects { reply }
     return res.status(200).json({ reply });
   } catch (err) {
-    // ---------- DEBUG PATH: show real error in UI + logs ----------
     console.error("Exerbud AI backend error:", err);
-
-    // Try to unwrap common OpenAI error shapes
-    const status = err.status || err.code;
-    const message =
-      (err?.error && err.error.message) ||
-      err?.message ||
-      String(err);
-
-    const debugInfo = `Exerbud backend error (status: ${status ?? "unknown"}): ${message}`;
-
-    // TEMPORARY: send back as reply so you see it in the chat bubble
-    return res.status(200).json({
-      reply: debugInfo,
-      error: message,
-      status,
+    return res.status(500).json({
+      error: "Exerbud backend failed.",
+      details:
+        process.env.NODE_ENV === "development"
+          ? err.message || String(err)
+          : undefined,
     });
   }
 };
