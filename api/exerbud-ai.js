@@ -48,6 +48,9 @@ Output style:
 // Main handler
 // ---------------------------------------------------------------------------
 module.exports = async (req, res) => {
+  // Version marker so we can see in Vercel logs
+  console.log("Exerbud handler v3: chat.completions, no responses.create");
+
   // Basic CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -94,7 +97,7 @@ module.exports = async (req, res) => {
         content: h.content,
       }));
 
-    // ---------- Build current user content (text + attachment summary) ----------
+    // ---------- Build user message including file metadata ----------
     let userContent = userMessage;
 
     if (attachments.length > 0) {
@@ -115,7 +118,7 @@ module.exports = async (req, res) => {
         "\n]";
     }
 
-    // ---------- Call Chat Completions API ----------
+    // ---------- Call Chat Completions API (no Responses, no input_text) ----------
     const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: [
@@ -144,7 +147,7 @@ module.exports = async (req, res) => {
   } catch (err) {
     console.error("Exerbud AI backend error:", err);
 
-    // Return 200 so the frontend doesn't show its generic error
+    // Return 200 so the frontend doesn't show its generic error banner
     const safeMessage =
       "I hit an internal backend error and couldn't complete this request. " +
       (err && err.message ? `Details: ${err.message}` : "");
