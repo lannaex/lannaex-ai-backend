@@ -61,69 +61,70 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // ---------- Parse body ----------
-  let body = req.body;
-  if (typeof body === "string") {
-    try {
-      body = JSON.parse(body);
-    } catch (err) {
-      return res.status(400).json({ error: "Invalid JSON in request body" });
-    }
-  }
-
-  if (!body || typeof body !== "object") {
-    return res.status(400).json({ error: "Request body must be a JSON object" });
-  }
-
-  const userMessage = (body.message || "").trim();
-  const history = Array.isArray(body.history) ? body.history : [];
-  const attachments = Array.isArray(body.attachments) ? body.attachments : [];
-
-  if (!userMessage) {
-    return res.status(400).json({ error: "Missing 'message' in body" });
-  }
-
-  const systemPrompt = buildExerbudSystemPrompt();
-
-  // ---------- Convert history to Responses API format ----------
-  const historyMessages = history
-    .filter((h) => h && typeof h.content === "string")
-    .map((h) => ({
-      role: h.role === "assistant" ? "assistant" : "user",
-      content: [
-        {
-          type: "input_text",
-          text: h.content,
-        },
-      ],
-    }));
-
-  // ---------- Build current user content (text + attachment summary) ----------
-  const contentParts = [
-    {
-      type: "input_text",
-      text: userMessage,
-    },
-  ];
-
-  if (attachments.length > 0) {
-    const fileSummaries = attachments.map((att, idx) => {
-      if (!att) return `file-${idx + 1}`;
-      const name = att.name || `file-${idx + 1}`;
-      const mime = att.type || "application/octet-stream";
-      const sizeKB = att.size ? `${Math.round(att.size / 1024)} KB` : "unknown size";
-      return `${name} (${mime}, ~${sizeKB})`;
-    });
-
-    contentParts.push({
-      type: "input_text",
-      text:
-        "The user also uploaded these files. You cannot see their contents; treat them only as conceptual context and ask the user to describe anything important in text:\n" +
-        fileSummaries.map((s) => "- " + s).join("\n"),
-    });
-  }
-
   try {
+    // ---------- Parse body ----------
+    let body = req.body;
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        return res.status(400).json({ error: "Invalid JSON in request body" });
+      }
+    }
+
+    if (!body || typeof body !== "object") {
+      return res.status(400).json({ error: "Request body must be a JSON object" });
+    }
+
+    const userMessage = (body.message || "").trim();
+    const history = Array.isArray(body.history) ? body.history : [];
+    const attachments = Array.isArray(body.attachments) ? body.attachments : [];
+
+    if (!userMessage) {
+      return res.status(400).json({ error: "Missing 'message' in body" });
+    }
+
+    const systemPrompt = buildExerbudSystemPrompt();
+
+    // ---------- Convert history to Responses API format ----------
+    const historyMessages = history
+      .filter((h) => h && typeof h.content === "string")
+      .map((h) => ({
+        role: h.role === "assistant" ? "assistant" : "user",
+        content: [
+          {
+            type: "input_text",
+            text: h.content,
+          },
+        ],
+      }));
+
+    // ---------- Build current user content (text + attachment summary) ----------
+    const contentParts = [
+      {
+        type: "input_text",
+        text: userMessage,
+      },
+    ];
+
+    if (attachments.length > 0) {
+      const fileSummaries = attachments.map((att, idx) => {
+        if (!att) return `file-${idx + 1}`;
+        const name = att.name || `file-${idx + 1}`;
+        const mime = att.type || "application/octet-stream";
+        const sizeKB = att.size ? `${Math.round(att.size / 1024)} KB` : "unknown size";
+        return `${name} (${mime}, ~${sizeKB})`;
+      });
+
+      contentParts.push({
+        type: "input_text",
+        text:
+          "The user also uploaded these files. You cannot see their contents; " +
+          "treat them only as conceptual context and ask the user to describe anything important in text:\n" +
+          fileSummaries.map((s) => "- " + s).join("\n"),
+      });
+    }
+
     // ---------- Call OpenAI Responses API ----------
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
@@ -167,12 +168,14 @@ module.exports = async (req, res) => {
     return res.status(200).json({ reply });
   } catch (err) {
     console.error("Exerbud AI backend error:", err);
-    return res.status(500).json({
-      error: "Exerbud backend failed.",
-      details:
-        process.env.NODE_ENV === "development"
-          ? err.message || String(err)
-          : undefined,
+
+    // IMPORTANT: still return 200 so the frontend doesn't hit its generic error path
+    const safeMessage =
+      "I hit an internal backend error and couldn't complete this request. " +
+      (err && err.message ? `Details: ${err.message}` : "");
+
+    return res.status(200).json({
+      reply: safeMessage || "I hit an internal error and couldn't respond properly.",
     });
   }
 };
