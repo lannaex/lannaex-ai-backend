@@ -23,24 +23,27 @@ Capabilities:
 - Suggest sustainable programming (not extreme).
 - Help with exercise selection, sets/reps, weekly splits, progression, deloads.
 - Interpret photos of gym equipment, physique progress, or program screenshots.
-  - When the user uploads images, describe what you see and use it to tailor advice
-    (e.g., equipment available, form cues at a concept level, general physique trends).
-- Use uploaded non-image files only conceptually (you do NOT see contents).
+- Use uploaded files as context:
+  - Images → you CAN see them. Always mention what you see and use it to tailor advice
+    (e.g., "In the photo I see a cable stack and dumbbells up to 25 kg…").
+  - Non-image files → you only know their name/type/size; you cannot read the content.
 
 Limitations:
 - You do NOT have live internet or map access.
 - If a user asks things like "find a gym near me" or "what’s the address / price right now":
   - Be explicit that you can’t look up specific locations or live data.
   - Instead, explain what to look for, how to evaluate options, and how they can search on their own
-    (e.g., “search for ‘24/7 strength gym + [their area]’”).
+    (e.g., "search for '24/7 strength gym + [their area]'").
 - You do NOT diagnose injuries or medical issues and never prescribe drugs.
   - If something sounds serious, advise them to see a qualified professional.
 
 Output style:
 - Start with 1–2 sentences reflecting what you understood.
+- If there are attachments, explicitly reference them in your first section
+  (e.g., "Based on the image you sent…").
 - Then give structured guidance with headings and bullet points.
 - End with 2–4 clear "Next steps" so the user knows exactly what to do.
-`.trim();
+  `.trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -71,9 +74,7 @@ module.exports = async (req, res) => {
   }
 
   if (!body || typeof body !== "object") {
-    return res
-      .status(400)
-      .json({ error: "Request body must be a JSON object" });
+    return res.status(400).json({ error: "Request body must be a JSON object" });
   }
 
   const userMessage = (body.message || "").trim();
@@ -86,87 +87,110 @@ module.exports = async (req, res) => {
 
   const systemPrompt = buildExerbudSystemPrompt();
 
-  // ---------- Build messages for chat.completions ----------
-  const messages = [];
-
-  // System
-  messages.push({
-    role: "system",
-    content: systemPrompt,
-  });
-
-  // History (plain text only)
-  history
+  // ---------- Convert history to Responses API format ----------
+  const historyMessages = history
     .filter((h) => h && typeof h.content === "string")
-    .forEach((h) => {
-      messages.push({
-        role: h.role === "assistant" ? "assistant" : "user",
-        content: h.content,
-      });
-    });
+    .map((h) => ({
+      role: h.role === "assistant" ? "assistant" : "user",
+      content: [
+        {
+          type: "input_text",
+          text: h.content,
+        },
+      ],
+    }));
 
-  // Current user message: text + image parts
-  const userContentParts = [];
+  // ---------- Build current user content (text + attachments) ----------
+  const contentParts = [
+    {
+      type: "input_text",
+      text: userMessage,
+    },
+  ];
 
-  // Text part
-  userContentParts.push({
-    type: "text",
-    text: userMessage,
-  });
+  const nonImageSummaries = [];
+  const imageSummaries = [];
 
-  // Image parts (vision)
   attachments.forEach((att, index) => {
     if (!att || !att.data || !att.type) return;
 
-    const mime = String(att.type || "");
-    if (!mime.startsWith("image/")) {
-      // Non-image files are ignored for now (no crash)
-      return;
+    const mime = String(att.type);
+    const name = String(att.name || `file-${index + 1}`);
+
+    if (mime.startsWith("image/")) {
+      // Image → vision input
+      contentParts.push({
+        type: "input_image",
+        image_url: {
+          url: `data:${mime};base64,${att.data}`,
+        },
+      });
+      imageSummaries.push(`${name} (${mime})`);
+    } else {
+      // Non-image → summarise only (model cannot see contents)
+      nonImageSummaries.push(
+        `${name} (${mime}, ~${Math.round((att.size || 0) / 1024)} KB)`
+      );
     }
+  });
 
-    userContentParts.push({
-      type: "image_url",
-      image_url: {
-        // Frontend is already sending base64 data; we wrap it as a data URL
-        url: `data:${mime};base64,${att.data}`,
-      },
+  if (imageSummaries.length > 0) {
+    contentParts.push({
+      type: "input_text",
+      text:
+        "The user also attached these image files. You CAN see them and should reference what you see:\n" +
+        imageSummaries.map((s) => "- " + s).join("\n"),
     });
-  });
+  }
 
-  messages.push({
-    role: "user",
-    content: userContentParts,
-  });
+  if (nonImageSummaries.length > 0) {
+    contentParts.push({
+      type: "input_text",
+      text:
+        "The user also uploaded these non-image files. " +
+        "You cannot read their contents; treat them only as conceptual context:\n" +
+        nonImageSummaries.map((s) => "- " + s).join("\n"),
+    });
+  }
 
   try {
-    // ---------- Call Chat Completions API ----------
-    const completion = await client.chat.completions.create({
+    // ---------- Call OpenAI Responses API ----------
+    const response = await client.responses.create({
       model: "gpt-4.1-mini",
-      messages,
+      input: [
+        {
+          role: "system",
+          content: [{ type: "input_text", text: systemPrompt }],
+        },
+        ...historyMessages,
+        {
+          role: "user",
+          content: contentParts,
+        },
+      ],
+      max_output_tokens: 900,
       temperature: 0.7,
-      max_tokens: 900,
     });
 
+    // ---------- Extract reply ----------
     let reply =
       "I’m not sure what to say yet — try asking again with a bit more detail about your training.";
 
     if (
-      completion &&
-      completion.choices &&
-      completion.choices[0] &&
-      completion.choices[0].message
+      response &&
+      Array.isArray(response.output) &&
+      response.output[0] &&
+      Array.isArray(response.output[0].content)
     ) {
-      const content = completion.choices[0].message.content;
-
-      if (Array.isArray(content)) {
-        // If API ever returns multi-part content, join the text pieces
-        reply = content
-          .filter((part) => part.type === "text" && part.text)
-          .map((part) => part.text)
-          .join("\n\n")
-          .trim();
-      } else if (typeof content === "string") {
-        reply = content.trim();
+      const textNode = response.output[0].content.find(
+        (c) => c.type === "output_text"
+      );
+      if (
+        textNode &&
+        textNode.text &&
+        typeof textNode.text.value === "string"
+      ) {
+        reply = textNode.text.value.trim();
       }
     }
 
