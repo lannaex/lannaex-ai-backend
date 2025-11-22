@@ -18,7 +18,7 @@ Tone:
 - Grounded and practical, no bro-science.
 - Respect people’s actual lives, schedules, stress, and recovery.
 
-Core capabilities:
+Capabilities:
 - Build and adjust workout plans (gym, home, travel, limited equipment).
 - Suggest sustainable programming (not extreme).
 - Help with exercise selection, sets/reps, weekly splits, progression, deloads.
@@ -27,21 +27,22 @@ Core capabilities:
   - Images → describe what you see and use it to tailor advice.
   - Non-image files → you only know their name/type/size; you cannot read the content.
 
-Internet / browsing:
-- You CAN use the browser tool to search the live internet when:
-  - The user asks for up-to-date info (e.g., local gyms, current class schedules, recent research).
-  - Your built-in knowledge may be outdated.
-- You CANNOT:
-  - See the user’s exact GPS location or live map view.
-  - Guarantee any specific price, schedule, or availability.
-- When using the internet:
-  - Ask for at least the user’s city / area if needed.
-  - Clearly say that details (hours, prices, etc.) may change and should be double-checked.
+Real web search:
+- You have access to a web_search tool.
+- Use web_search when the user explicitly asks for:
+  - local options (e.g., gyms near them, classes, facilities),
+  - current information (hours, schedules, prices, new guidelines),
+  - recent information where being up to date matters.
+- When doing a search:
+  - Include the location (city/area/country) in the query if the user provides it.
+  - If they say "near me" but did NOT specify a location in the conversation,
+    first ask them (once) for their city/area before searching.
+  - Make 1–3 focused searches rather than many broad ones.
+  - Summarize results clearly and avoid overwhelming lists.
 
 Limitations:
-- You do NOT diagnose injuries or medical issues and never prescribe drugs.
-  - If something sounds serious (chest pain, acute joint injury, etc.), advise them to see a qualified professional.
-- If browsing fails for any reason, fall back to giving general, non–time-sensitive guidance and say you couldn’t access live data.
+- Do NOT diagnose injuries or medical issues or prescribe medications.
+- If something sounds serious, advise them to see a qualified professional.
 
 Output style:
 - Start with 1–2 sentences reflecting what you understood.
@@ -78,7 +79,9 @@ module.exports = async (req, res) => {
   }
 
   if (!body || typeof body !== "object") {
-    return res.status(400).json({ error: "Request body must be a JSON object" });
+    return res
+      .status(400)
+      .json({ error: "Request body must be a JSON object" });
   }
 
   const userMessage = (body.message || "").trim();
@@ -147,7 +150,7 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // ---------- Call OpenAI Responses API (with browsing enabled) ----------
+    // ---------- Call OpenAI Responses API with web_search tool ----------
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
@@ -161,30 +164,36 @@ module.exports = async (req, res) => {
           content: contentParts,
         },
       ],
+      tools: [
+        {
+          type: "web_search",
+        },
+      ],
       max_output_tokens: 900,
       temperature: 0.7,
-      browser: { enable: true }, // <- enables internet search
     });
 
     // ---------- Extract reply ----------
     let reply =
       "I’m not sure what to say yet — try asking again with a bit more detail about your training.";
 
-    if (
-      response &&
-      Array.isArray(response.output) &&
-      response.output[0] &&
-      Array.isArray(response.output[0].content)
-    ) {
-      const textNode = response.output[0].content.find(
-        (c) => c.type === "output_text"
+    if (response && Array.isArray(response.output)) {
+      // Find the first message-type output (there may also be web_search_call entries)
+      const messageItem = response.output.find(
+        (item) => item.type === "message" && Array.isArray(item.content)
       );
-      if (
-        textNode &&
-        textNode.text &&
-        typeof textNode.text.value === "string"
-      ) {
-        reply = textNode.text.value.trim();
+
+      if (messageItem) {
+        const textNode = messageItem.content.find(
+          (c) => c.type === "output_text"
+        );
+        if (
+          textNode &&
+          textNode.text &&
+          typeof textNode.text.value === "string"
+        ) {
+          reply = textNode.text.value.trim();
+        }
       }
     }
 
