@@ -1,109 +1,152 @@
-// ---------------------------
-// Exerbud AI – Fitness-Only Backend
-// ---------------------------
+// api/exerbud-ai.js
 
-import OpenAI from "openai";
+const OpenAI = require("openai");
 
-export default async function handler(req, res) {
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+module.exports = async (req, res) => {
+  // Basic CORS (same pattern as your other routes)
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-  });
+  // ---- Parse body safely ----
+  let body = req.body;
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      return res.status(400).json({ error: "Invalid JSON in request body" });
+    }
+  }
 
-  const { message, history = [] } = req.body;
+  const userMessage = (body && body.message) || "";
+  const history = Array.isArray(body && body.history) ? body.history : [];
 
-  // SAFEGUARD: CLEAN HISTORY
-  const safeHistory = Array.isArray(history)
-    ? history.slice(-20)
-    : [];
+  if (!userMessage) {
+    return res.status(400).json({ error: "Missing 'message' in body" });
+  }
 
-  // ----------------------------------------------------
-  // SYSTEM PROMPT — FITNESS ONLY, NO BUSINESS EVER
-  // ----------------------------------------------------
+  // ---- Exerbud: Fitness-only system prompt ----
   const systemPrompt = `
-You are **Exerbud**, a personal fitness + training AI coach.
+You are **Exerbud**, a personal fitness and training AI coach.
 
-Your ONLY domain:
-- strength training
-- muscle gain
-- fat loss
-- conditioning
-- mobility
-- flexibility
-- cardio programming
-- training while traveling
-- lifestyle routines
-- sleep, energy, recovery
-- simple non-medical nutrition (macros, protein, hydration)
-- motivation and consistency guidance
+Your ONLY focus is the user's own:
+- strength, muscle gain, conditioning
+- fat loss and body recomposition
+- mobility, flexibility, joint-friendly training
+- cardio and conditioning
+- training around travel or a busy schedule
+- recovery, sleep, energy
+- simple, non-medical nutrition to support training
 
-You MUST **NOT**:
-- talk about business
-- ask about audience, clients, target market
-- mention programs, offers, coaching businesses
-- interpret questions as related to business, marketing, or product creation
+You MUST NOT talk about:
+- business, clients, audience, or offers
+- coaching programs or products for sale
+- marketing, positioning, or content strategy
 
-If the user says something like:
-“weight loss” / “energy” / “health” / “fat loss” / “strength” / “diet” / “routine”
-→ ALWAYS assume **their personal health**, never business.
+If a user says something like "3 days per week", "energy", "health", "weight loss":
+- ALWAYS interpret it as their **personal training or health context**,
+  not anything about business or clients.
 
-----------------------------------------------------
-SHORT ANSWER RULE
-----------------------------------------------------
-If the user replies with a short word or phrase (example: “health”, “energy”, “fat loss”, “strength”, “3 days”, “gym”):
-- Treat it as an answer to your LAST clarifying question.
-- DO NOT restart the topic.
-- DO NOT ask “Is this for business?” EVER.
-- Infer the meaning from context.
+SHORT ANSWERS RULE:
+If the user replies with a short phrase (e.g., "3 days per week", "health", "fat loss"):
+- Treat it as an answer to your last question (e.g., training frequency, goal),
+  NOT a brand-new topic.
+- Do NOT ask whether this is for business or projects.
+- Assume they mean "I can train 3 days per week" / "my main goal is health" etc.
 
-Example:
-Assistant: “What’s your main goal?”
-User: “strength”
-→ You respond with a strength plan, NOT more questions.
+ONBOARDING:
+If you still don’t know:
+- main goal (fat loss, strength, muscle, energy, mobility, etc.)
+- training frequency (days/week)
+- equipment access (gym, dumbbells only, bands, bodyweight, etc.)
+- injuries/limitations
 
-----------------------------------------------------
-BEHAVIOR
-----------------------------------------------------
-- Give practical guidance.
-- Keep explanations simple and actionable.
-- Do not lecture.
-- No corporate tone.
-- No long lists unless useful.
-- No disclaimers unless safety related.
+…you can ask up to 2-3 simple clarifying questions, then start giving a practical plan.
 
-----------------------------------------------------
-OUTPUT FORMAT
-----------------------------------------------------
-Plain text is fine. Use short paragraphs and optional bullet points.
-  `;
+OUTPUT STYLE:
+- Calm, clear, practical.
+- No corporate or business language.
+- Short paragraphs + bullet points for any plan.
+- Focus on what the user can realistically do given their schedule, equipment, and joints.
 
-  // Prepare messages for API
-  const messages = [
-    { role: "system", content: systemPrompt },
-    ...safeHistory.map(m => ({
-      role: m.role === "assistant" ? "assistant" : "user",
-      content: m.content
-    })),
-    { role: "user", content: message }
-  ];
+SAFETY:
+- You are not a doctor or PT; avoid diagnosis or medical treatment.
+- For serious pain or medical issues, suggest they talk to a professional before changing training.
+  `.trim();
 
   try {
-    const completion = await openai.chat.completions.create({
+    // Build messages array with system + history + current message
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...history
+        .filter(
+          (m) =>
+            m &&
+            typeof m.content === "string" &&
+            (m.role === "user" || m.role === "assistant")
+        )
+        .map((m) => ({
+          role: m.role,
+          content: m.content,
+        })),
+      { role: "user", content: userMessage },
+    ];
+
+    const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
       messages,
-      temperature: 0.6
+      temperature: 0.55,
+      max_tokens: 900,
     });
 
-    const reply =
-      completion?.choices?.[0]?.message?.content ||
-      "Sorry — I couldn’t think of a response.";
+    let reply =
+      completion.choices?.[0]?.message?.content?.trim() ||
+      "To tailor this properly, tell me your main goal, how many days per week you can train, what equipment you have, and any injuries or limits.";
+
+    // ---- Hard guardrail: strip obvious business language if it leaks ----
+    const bannedRe = /\b(business|clients?|target audience|offer(s)?|service(s)?|product(s)?|marketing|program for your clients?)\b/i;
+
+    if (bannedRe.test(reply)) {
+      // Fallback: generic, clearly fitness-only response using the latest user message
+      reply = `
+Let's keep this focused on your personal training.
+
+Based on what you've shared so far, I'll assume you're asking how to structure your own workouts.
+
+Here’s a simple way to use that information for your fitness:
+
+- Treat "${userMessage}" as part of your personal training context (for example, days per week you can train, or the main goal you're aiming for).
+- From here, you can tell me:
+  - your main goal (fat loss, strength, muscle, energy, mobility),
+  - what equipment you have,
+  - any injuries or joints we should protect.
+
+Once I have that, I’ll give you a clear, realistic training plan just for your body and schedule.
+      `.trim();
+    }
+
+    // TEMPORARY: prepend a debug tag so you know this file is active.
+    // You can remove this line once you've confirmed it's working.
+    reply = `DEBUG: Exerbud fitness backend active.\n\n${reply}`;
 
     return res.status(200).json({ reply });
   } catch (err) {
-    console.error("API error:", err);
-    return res.status(500).json({ error: "Server error" });
+    console.error("Exerbud AI backend error:", err);
+    return res.status(500).json({
+      error: "Something went wrong talking to the Exerbud backend.",
+      details:
+        process.env.NODE_ENV === "development"
+          ? String(err.message || err)
+          : undefined,
+    });
   }
-}
+};
