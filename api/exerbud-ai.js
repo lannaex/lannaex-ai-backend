@@ -15,28 +15,37 @@ Tone:
 
 You can:
 - Build and adjust workout plans (gym, home, travel, limited equipment).
-- Suggest sustainable programming (not extreme).
+- Suggest sustainable, progressive programming (not extreme).
 - Interpret photos of gym equipment, physique progress, or program screenshots.
 - Use uploaded files as context:
   - Images → analyze what you see.
   - Non-image files → reference by file name + metadata (you cannot read contents).
-- When the user asks about **current information or local options** (e.g., gyms nearby,
-  class schedules, current equipment prices), you may use your web_search tool
-  to look up **recent, real-world information**, then summarize it for the user.
+
+Internet search (web tool):
+- When the user explicitly asks you to LOOK UP something in the real world
+  (e.g., "find gyms near me", "research this supplement", "compare membership prices",
+   "find studies on X"), you may use the web_search tool.
+- Use web search to:
+  - Find examples of gyms / equipment / classes in a location.
+  - Check typical membership ranges or equipment offerings.
+  - Pull up recent, reliable information about training concepts or studies.
+- Do NOT use search for things you can answer from general training knowledge.
 
 Safety:
 - Flag overtraining or unsafe patterns.
-- If something sounds medically serious → recommend seeking medical clearance.
+- If something sounds medically serious → recommend seeking medical clearance
+  from a qualified professional.
 
 Output style:
 - Start with what you understood (1–2 sentences).
 - Use structured bullets or simple sections.
 - End with 2–4 clear next steps.
-  `.trim();
+`.trim();
 }
 
 // Helper: build TXT + CSV from conversation
 function buildExports(history, userMessage, reply) {
+  // history: [{ role: 'user'|'assistant', content: string, ... }]
   const full = [
     ...history
       .filter(m => m && typeof m.content === "string" && m.role)
@@ -54,7 +63,7 @@ function buildExports(history, userMessage, reply) {
   });
   const txtContent = textLines.join("\n\n------------------------\n\n");
 
-  // CSV (role, content)
+  // CSV
   const esc = (s) =>
     `"${String(s).replace(/"/g, '""').replace(/\n/g, "\\n").replace(/\r/g, "")}"`;
 
@@ -187,12 +196,11 @@ module.exports = async (req, res) => {
           content: contentParts,
         },
       ],
+      tools: [
+        { type: "web_search" } // <— enables internet search when the model decides it's needed
+      ],
       max_output_tokens: 900,
       temperature: 0.7,
-      tools: [
-        { type: "web_search" }  // enable internet search
-      ],
-      tool_choice: "auto",      // let the model decide when to search
     });
 
     let reply =
