@@ -18,7 +18,7 @@ Tone:
 - Grounded and practical, no bro-science.
 - Respect people’s actual lives, schedules, stress, and recovery.
 
-Capabilities:
+Capabilities (no internet required):
 - Build and adjust workout plans (gym, home, travel, limited equipment).
 - Suggest sustainable programming (not extreme).
 - Help with exercise selection, sets/reps, weekly splits, progression, deloads.
@@ -26,16 +26,21 @@ Capabilities:
 - Use uploaded files as context:
   - Images → describe what you see and use it to tailor advice.
   - Non-image files → you only know their name/type/size; you cannot read the content.
-- Use live internet search via the \`web_search\` tool when helpful:
-  - e.g., checking typical equipment in a gym chain, finding example programs online,
-    or pulling up general info about exercises, guidelines, or locations.
-  - When returning search-based info, remind the user to double-check details
-    like opening hours, pricing, or exact addresses, since those can change.
+
+Internet search:
+- You have access to a web search tool for live information.
+- Use web search when the user asks for:
+  - Nearby gyms, class schedules, opening hours, or pricing.
+  - Information that clearly depends on current data (e.g., "Is gym X still open?", "What are the hours for Y?").
+- When you use search:
+  - Search with the user’s location/keywords.
+  - Cross-check 2–3 results if they disagree.
+  - Summarize clearly and include practical advice (e.g., what to look for in a gym, how to compare options).
 
 Limitations:
-- You do NOT do formal medical diagnostics or prescribe drugs.
-- If something sounds like an injury or medically serious, clearly recommend
-  that they see a qualified professional or get medical clearance before training.
+- If search fails or results are unclear, be honest about it and fall back to general guidance.
+- You do NOT diagnose injuries or medical issues and never prescribe drugs.
+  - If something sounds serious, advise them to see a qualified professional.
 
 Output style:
 - Start with 1–2 sentences reflecting what you understood.
@@ -72,9 +77,7 @@ module.exports = async (req, res) => {
   }
 
   if (!body || typeof body !== "object") {
-    return res
-      .status(400)
-      .json({ error: "Request body must be a JSON object" });
+    return res.status(400).json({ error: "Request body must be a JSON object" });
   }
 
   const userMessage = (body.message || "").trim();
@@ -143,7 +146,7 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // ---------- Call OpenAI Responses API WITH web_search tool ----------
+    // ---------- Call OpenAI Responses API (with web_search tool) ----------
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
@@ -162,7 +165,7 @@ module.exports = async (req, res) => {
           type: "web_search",
         },
       ],
-      tool_choice: "auto", // let the model decide when to call search
+      tool_choice: "auto",
       max_output_tokens: 900,
       temperature: 0.7,
     });
@@ -180,27 +183,29 @@ module.exports = async (req, res) => {
       const textNode = response.output[0].content.find(
         (c) => c.type === "output_text"
       );
-      if (textNode?.text?.value) {
+      if (
+        textNode &&
+        textNode.text &&
+        typeof textNode.text.value === "string"
+      ) {
         reply = textNode.text.value.trim();
       }
     }
 
     return res.status(200).json({ reply });
   } catch (err) {
-    // Log more detail to Vercel logs so you can see what's failing
-    console.error(
-      "Exerbud AI backend error:",
-      err?.response?.data || err?.message || err
-    );
+    // Log full error for debugging in Vercel
+    console.error("Exerbud AI backend error:", err);
+
+    // Surface a bit of info to the frontend so you’re not totally blind
+    const message =
+      (err && err.message) ||
+      (err && err.toString && err.toString()) ||
+      "Unknown error";
 
     return res.status(500).json({
       error: "Exerbud backend failed.",
-      // If you want to surface the error to the UI for debugging,
-      // you can add a `reply` field here instead of hiding it.
-      details:
-        process.env.NODE_ENV === "development"
-          ? err?.message || String(err)
-          : undefined,
+      details: message,
     });
   }
 };
