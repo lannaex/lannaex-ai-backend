@@ -18,30 +18,28 @@ Tone:
 - Grounded and practical, no bro-science.
 - Respect people’s actual lives, schedules, stress, and recovery.
 
-You can:
+Capabilities:
 - Build and adjust workout plans (gym, home, travel, limited equipment).
 - Suggest sustainable programming (not extreme).
 - Help with exercise selection, sets/reps, weekly splits, progression, deloads.
-- Give form cues at a conceptual level (not detailed medical diagnostics).
-- Adapt training around injuries or limitations, but always advise medical clearance.
+- Interpret photos of gym equipment, physique progress, or program screenshots.
+  - When the user uploads images, describe what you see and use it to tailor advice
+    (e.g., equipment available, form cues at a concept level, general physique trends).
+- Use uploaded non-image files only conceptually (you do NOT see contents).
 
 Limitations:
-- You do NOT have live internet or maps.
-- If the user asks for real-time data (e.g., “find a gym near me”, prices, schedules):
-  - Say clearly you can’t look it up.
-  - Help them decide what to search for and what criteria to use.
+- You do NOT have live internet or map access.
+- If a user asks things like "find a gym near me" or "what’s the address / price right now":
+  - Be explicit that you can’t look up specific locations or live data.
+  - Instead, explain what to look for, how to evaluate options, and how they can search on their own
+    (e.g., “search for ‘24/7 strength gym + [their area]’”).
 - You do NOT diagnose injuries or medical issues and never prescribe drugs.
   - If something sounds serious, advise them to see a qualified professional.
 
 Output style:
 - Start with 1–2 sentences reflecting what you understood.
-- Then use clear headings and bullet points.
-- When giving plans, include:
-  - split (e.g., full-body 3x/week)
-  - exercises
-  - sets/reps
-  - progression notes
-- End with 2–4 concrete "Next steps" so the user knows exactly what to do.
+- Then give structured guidance with headings and bullet points.
+- End with 2–4 clear "Next steps" so the user knows exactly what to do.
 `.trim();
 }
 
@@ -67,17 +65,20 @@ module.exports = async (req, res) => {
   if (typeof body === "string") {
     try {
       body = JSON.parse(body);
-    } catch {
+    } catch (err) {
       return res.status(400).json({ error: "Invalid JSON in request body" });
     }
   }
 
   if (!body || typeof body !== "object") {
-    return res.status(400).json({ error: "Request body must be a JSON object" });
+    return res
+      .status(400)
+      .json({ error: "Request body must be a JSON object" });
   }
 
   const userMessage = (body.message || "").trim();
   const history = Array.isArray(body.history) ? body.history : [];
+  const attachments = Array.isArray(body.attachments) ? body.attachments : [];
 
   if (!userMessage) {
     return res.status(400).json({ error: "Missing 'message' in body" });
@@ -85,33 +86,56 @@ module.exports = async (req, res) => {
 
   const systemPrompt = buildExerbudSystemPrompt();
 
-  // ---------- Build chat messages for Chat Completions ----------
-  const messages = [
-    {
-      role: "system",
-      content: systemPrompt,
-    },
-  ];
+  // ---------- Build messages for chat.completions ----------
+  const messages = [];
 
-  // keep only the last ~20 messages from history for context
-  const trimmedHistory = history.slice(-20);
+  // System
+  messages.push({
+    role: "system",
+    content: systemPrompt,
+  });
 
-  trimmedHistory.forEach((m) => {
-    if (!m || typeof m.content !== "string") return;
+  // History (plain text only)
+  history
+    .filter((h) => h && typeof h.content === "string")
+    .forEach((h) => {
+      messages.push({
+        role: h.role === "assistant" ? "assistant" : "user",
+        content: h.content,
+      });
+    });
 
-    const role =
-      m.role === "assistant" || m.role === "Assistant" ? "assistant" : "user";
+  // Current user message: text + image parts
+  const userContentParts = [];
 
-    messages.push({
-      role,
-      content: m.content,
+  // Text part
+  userContentParts.push({
+    type: "text",
+    text: userMessage,
+  });
+
+  // Image parts (vision)
+  attachments.forEach((att, index) => {
+    if (!att || !att.data || !att.type) return;
+
+    const mime = String(att.type || "");
+    if (!mime.startsWith("image/")) {
+      // Non-image files are ignored for now (no crash)
+      return;
+    }
+
+    userContentParts.push({
+      type: "image_url",
+      image_url: {
+        // Frontend is already sending base64 data; we wrap it as a data URL
+        url: `data:${mime};base64,${att.data}`,
+      },
     });
   });
 
-  // Current user message
   messages.push({
     role: "user",
-    content: userMessage,
+    content: userContentParts,
   });
 
   try {
@@ -120,7 +144,7 @@ module.exports = async (req, res) => {
       model: "gpt-4.1-mini",
       messages,
       temperature: 0.7,
-      max_tokens: 800,
+      max_tokens: 900,
     });
 
     let reply =
@@ -130,13 +154,22 @@ module.exports = async (req, res) => {
       completion &&
       completion.choices &&
       completion.choices[0] &&
-      completion.choices[0].message &&
-      typeof completion.choices[0].message.content === "string"
+      completion.choices[0].message
     ) {
-      reply = completion.choices[0].message.content.trim();
+      const content = completion.choices[0].message.content;
+
+      if (Array.isArray(content)) {
+        // If API ever returns multi-part content, join the text pieces
+        reply = content
+          .filter((part) => part.type === "text" && part.text)
+          .map((part) => part.text)
+          .join("\n\n")
+          .trim();
+      } else if (typeof content === "string") {
+        reply = content.trim();
+      }
     }
 
-    // Frontend expects { reply }
     return res.status(200).json({ reply });
   } catch (err) {
     console.error("Exerbud AI backend error:", err);
