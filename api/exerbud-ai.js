@@ -1,112 +1,77 @@
 // api/exerbud-ai.js
 
 const OpenAI = require("openai");
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ---- System Prompt ---------------------------------------------------------
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// ---------------------------------------------------------------------------
+// System prompt
+// ---------------------------------------------------------------------------
 function buildExerbudSystemPrompt() {
   return `
 You are Exerbud — a realistic, no-bullshit strength and conditioning coach.
 
 Tone:
 - Direct but kind.
-- Grounded, practical, no bro-science.
+- Grounded and practical, no bro-science.
 - Respect people’s actual lives, schedules, stress, and recovery.
 
-You can:
+Capabilities:
 - Build and adjust workout plans (gym, home, travel, limited equipment).
 - Suggest sustainable programming (not extreme).
+- Help with exercise selection, sets/reps, weekly splits, progression, deloads.
 - Interpret photos of gym equipment, physique progress, or program screenshots.
 - Use uploaded files as context:
-  - Images → analyze what you see.
-  - Non-image files → reference by file name + metadata (you cannot read contents).
-- Use web search when helpful (for example: finding general info about exercises,
-  basic gym chains in a city, typical membership ranges, or simple travel logistics).
-  - You CANNOT see the user’s exact location unless they tell you.
-  - For “near me” questions, ask for their city/area first.
+  - Images → describe what you see and use it to tailor advice.
+  - Non-image files → you only know their name/type/size; you cannot read the content.
 
-Safety:
-- Flag overtraining or unsafe patterns.
-- If something sounds medically serious → recommend seeking medical clearance.
+Limitations:
+- You do NOT have live internet or map access.
+- If a user asks things like "find a gym near me" or "what’s the address / price right now":
+  - Be explicit that you can’t look up specific locations or live data.
+  - Instead, explain what to look for, how to evaluate options, and how they can search on their own
+    (e.g., “search for ‘24/7 strength gym + [their area]’”).
+- You do NOT diagnose injuries or medical issues and never prescribe drugs.
+  - If something sounds serious, advise them to see a qualified professional.
 
 Output style:
-- Start with what you understood (1–2 sentences).
-- Use structured bullets or simple sections.
-- End with 2–4 clear next steps.
+- Start with 1–2 sentences reflecting what you understood.
+- Then give structured guidance with headings and bullet points.
+- End with 2–4 clear "Next steps" so the user knows exactly what to do.
   `.trim();
 }
 
-// Helper: build TXT + CSV from conversation
-function buildExports(history, userMessage, reply) {
-  const full = [
-    ...history
-      .filter(m => m && typeof m.content === "string" && m.role)
-      .map(m => ({ role: m.role, content: m.content })),
-    { role: "user", content: userMessage },
-    { role: "assistant", content: reply },
-  ];
-
-  if (!full.length) return [];
-
-  // TXT
-  const textLines = full.map(m => {
-    const roleLabel = String(m.role || "").toUpperCase();
-    return `${roleLabel}:\n${m.content}`;
-  });
-  const txtContent = textLines.join("\n\n------------------------\n\n");
-
-  // CSV (role, content)
-  const esc = (s) =>
-    `"${String(s).replace(/"/g, '""').replace(/\n/g, "\\n").replace(/\r/g, "")}"`;
-
-  const csvRows = [
-    "role,content",
-    ...full.map(m => `${esc(m.role)},${esc(m.content)}`),
-  ];
-  const csvContent = csvRows.join("\n");
-
-  const txtBase64 = Buffer.from(txtContent, "utf8").toString("base64");
-  const csvBase64 = Buffer.from(csvContent, "utf8").toString("base64");
-
-  return [
-    {
-      url: `data:text/plain;base64,${txtBase64}`,
-      name: "exerbud-session.txt",
-      label: "Download session as TXT",
-    },
-    {
-      url: `data:text/csv;base64,${csvBase64}`,
-      name: "exerbud-session.csv",
-      label: "Download session as CSV",
-    },
-  ];
-}
-
 // ---------------------------------------------------------------------------
-
+// Main handler
+// ---------------------------------------------------------------------------
 module.exports = async (req, res) => {
-  // CORS
+  // Basic CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // Parse JSON body
+  // ---------- Parse body ----------
   let body = req.body;
   if (typeof body === "string") {
     try {
       body = JSON.parse(body);
-    } catch {
+    } catch (err) {
       return res.status(400).json({ error: "Invalid JSON in request body" });
     }
   }
 
   if (!body || typeof body !== "object") {
-    return res.status(400).json({ error: "Request body must be an object" });
+    return res.status(400).json({ error: "Request body must be a JSON object" });
   }
 
   const userMessage = (body.message || "").trim();
@@ -119,10 +84,10 @@ module.exports = async (req, res) => {
 
   const systemPrompt = buildExerbudSystemPrompt();
 
-  // -------- Convert history → Responses API format --------
+  // ---------- Convert history to Responses API format ----------
   const historyMessages = history
-    .filter(h => h && typeof h.content === "string")
-    .map(h => ({
+    .filter((h) => h && typeof h.content === "string")
+    .map((h) => ({
       role: h.role === "assistant" ? "assistant" : "user",
       content: [
         {
@@ -132,7 +97,7 @@ module.exports = async (req, res) => {
       ],
     }));
 
-  // -------- Build content for the current user message --------
+  // ---------- Build current user content (text + attachments) ----------
   const contentParts = [
     {
       type: "input_text",
@@ -142,14 +107,14 @@ module.exports = async (req, res) => {
 
   const nonImageSummaries = [];
 
-  attachments.forEach(att => {
+  attachments.forEach((att, index) => {
     if (!att || !att.data || !att.type) return;
 
     const mime = String(att.type);
-    const name = String(att.name || "file");
+    const name = String(att.name || `file-${index + 1}`);
 
     if (mime.startsWith("image/")) {
-      // Vision: inline as data URL
+      // Image → vision input
       contentParts.push({
         type: "input_image",
         image_url: {
@@ -157,7 +122,7 @@ module.exports = async (req, res) => {
         },
       });
     } else {
-      // Non-image files → summarized as metadata
+      // Non-image → summarise only (model cannot see contents)
       nonImageSummaries.push(
         `${name} (${mime}, ~${Math.round((att.size || 0) / 1024)} KB)`
       );
@@ -168,16 +133,16 @@ module.exports = async (req, res) => {
     contentParts.push({
       type: "input_text",
       text:
-        "The user also uploaded these non-image files (you cannot read their contents directly; treat them conceptually):\n" +
-        nonImageSummaries.map(x => "- " + x).join("\n"),
+        "The user also uploaded these non-image files. " +
+        "You cannot read their contents; treat them only as conceptual context:\n" +
+        nonImageSummaries.map((s) => "- " + s).join("\n"),
     });
   }
 
   try {
-    // -------- Call Responses API (with web search tool) --------
+    // ---------- Call OpenAI Responses API ----------
     const response = await client.responses.create({
-      model: "gpt-4.1",
-      tools: [{ type: "web_search" }],
+      model: "gpt-4.1-mini",
       input: [
         {
           role: "system",
@@ -193,8 +158,9 @@ module.exports = async (req, res) => {
       temperature: 0.7,
     });
 
+    // ---------- Extract reply ----------
     let reply =
-      "I’m not sure what to say yet. Try asking again with a bit more detail.";
+      "I’m not sure what to say yet — try asking again with a bit more detail about your training.";
 
     if (
       response &&
@@ -203,27 +169,27 @@ module.exports = async (req, res) => {
       Array.isArray(response.output[0].content)
     ) {
       const textNode = response.output[0].content.find(
-        c => c.type === "output_text"
+        (c) => c.type === "output_text"
       );
-      if (textNode?.text?.value) {
+      if (
+        textNode &&
+        textNode.text &&
+        typeof textNode.text.value === "string"
+      ) {
         reply = textNode.text.value.trim();
       }
     }
 
-    // -------- Build downloadable files (TXT + CSV) --------
-    const files = buildExports(history, userMessage, reply);
-
-    return res.status(200).json({
-      reply,
-      files,
-    });
+    // Frontend only expects `reply` right now
+    return res.status(200).json({ reply });
   } catch (err) {
     console.error("Exerbud AI backend error:", err);
     return res.status(500).json({
       error: "Exerbud backend failed.",
+      // Only expose details in development
       details:
         process.env.NODE_ENV === "development"
-          ? String(err.message || err)
+          ? err.message || String(err)
           : undefined,
     });
   }
