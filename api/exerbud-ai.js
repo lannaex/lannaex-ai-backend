@@ -20,6 +20,9 @@ You can:
 - Use uploaded files as context:
   - Images → analyze what you see.
   - Non-image files → reference by file name + metadata (you cannot read contents).
+- When the user asks about **current information or local options** (e.g., gyms nearby,
+  class schedules, current equipment prices), you may use your web_search tool
+  to look up **recent, real-world information**, then summarize it for the user.
 
 Safety:
 - Flag overtraining or unsafe patterns.
@@ -32,13 +35,13 @@ Output style:
   `.trim();
 }
 
-// ---- Build TXT + CSV from conversation ------------------------------------
+// Helper: build TXT + CSV from conversation
 function buildExports(history, userMessage, reply) {
   const full = [
     ...history
       .filter(m => m && typeof m.content === "string" && m.role)
       .map(m => ({ role: m.role, content: m.content })),
-    { role: "user",      content: userMessage },
+    { role: "user", content: userMessage },
     { role: "assistant", content: reply },
   ];
 
@@ -51,7 +54,7 @@ function buildExports(history, userMessage, reply) {
   });
   const txtContent = textLines.join("\n\n------------------------\n\n");
 
-  // CSV
+  // CSV (role, content)
   const esc = (s) =>
     `"${String(s).replace(/"/g, '""').replace(/\n/g, "\\n").replace(/\r/g, "")}"`;
 
@@ -66,13 +69,13 @@ function buildExports(history, userMessage, reply) {
 
   return [
     {
-      url:   `data:text/plain;base64,${txtBase64}`,
-      name:  "exerbud-session.txt",
+      url: `data:text/plain;base64,${txtBase64}`,
+      name: "exerbud-session.txt",
       label: "Download session as TXT",
     },
     {
-      url:   `data:text/csv;base64,${csvBase64}`,
-      name:  "exerbud-session.csv",
+      url: `data:text/csv;base64,${csvBase64}`,
+      name: "exerbud-session.csv",
       label: "Download session as CSV",
     },
   ];
@@ -91,7 +94,7 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // Parse body safely
+  // Parse JSON body
   let body = req.body;
   if (typeof body === "string") {
     try {
@@ -106,7 +109,7 @@ module.exports = async (req, res) => {
   }
 
   const userMessage = (body.message || "").trim();
-  const history     = Array.isArray(body.history) ? body.history : [];
+  const history = Array.isArray(body.history) ? body.history : [];
   const attachments = Array.isArray(body.attachments) ? body.attachments : [];
 
   if (!userMessage) {
@@ -115,28 +118,25 @@ module.exports = async (req, res) => {
 
   const systemPrompt = buildExerbudSystemPrompt();
 
-  // ---------- Build chat.completions messages ----------
-  const messages = [];
+  // -------- Convert history → Responses API format --------
+  const historyMessages = history
+    .filter(h => h && typeof h.content === "string")
+    .map(h => ({
+      role: h.role === "assistant" ? "assistant" : "user",
+      content: [
+        {
+          type: "input_text",
+          text: h.content,
+        },
+      ],
+    }));
 
-  // System
-  messages.push({
-    role: "system",
-    content: systemPrompt,
-  });
-
-  // History (just text – no vision here)
-  history
-    .filter(m => m && typeof m.content === "string")
-    .forEach(m => {
-      messages.push({
-        role: m.role === "assistant" ? "assistant" : "user",
-        content: m.content,
-      });
-    });
-
-  // Current user message with attachments
-  const userContentParts = [
-    { type: "text", text: userMessage },
+  // -------- Build content for the current user message --------
+  const contentParts = [
+    {
+      type: "input_text",
+      text: userMessage,
+    },
   ];
 
   const nonImageSummaries = [];
@@ -148,14 +148,15 @@ module.exports = async (req, res) => {
     const name = String(att.name || "file");
 
     if (mime.startsWith("image/")) {
-      // Vision
-      userContentParts.push({
-        type: "image_url",
+      // Vision: inline as data URL
+      contentParts.push({
+        type: "input_image",
         image_url: {
           url: `data:${mime};base64,${att.data}`,
         },
       });
     } else {
+      // Non-image files → summarized as metadata
       nonImageSummaries.push(
         `${name} (${mime}, ~${Math.round((att.size || 0) / 1024)} KB)`
       );
@@ -163,50 +164,69 @@ module.exports = async (req, res) => {
   });
 
   if (nonImageSummaries.length > 0) {
-    userContentParts.push({
-      type: "text",
+    contentParts.push({
+      type: "input_text",
       text:
         "The user also uploaded these non-image files (you cannot read their contents directly; treat them conceptually):\n" +
         nonImageSummaries.map(x => "- " + x).join("\n"),
     });
   }
 
-  messages.push({
-    role: "user",
-    content: userContentParts,
-  });
-
   try {
-    // ---------- Call Chat Completions (stable, supports vision) ----------
-    const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages,
+    // -------- Call Responses API with web_search tool enabled --------
+    const response = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "system",
+          content: [{ type: "input_text", text: systemPrompt }],
+        },
+        ...historyMessages,
+        {
+          role: "user",
+          content: contentParts,
+        },
+      ],
+      max_output_tokens: 900,
       temperature: 0.7,
-      max_tokens: 900,
+      tools: [
+        { type: "web_search" }  // enable internet search
+      ],
+      tool_choice: "auto",      // let the model decide when to search
     });
 
     let reply =
       "I’m not sure what to say yet. Try asking again with a bit more detail.";
 
     if (
-      completion &&
-      completion.choices &&
-      completion.choices[0] &&
-      completion.choices[0].message &&
-      typeof completion.choices[0].message.content === "string"
+      response &&
+      Array.isArray(response.output) &&
+      response.output[0] &&
+      Array.isArray(response.output[0].content)
     ) {
-      reply = completion.choices[0].message.content.trim();
+      const textNode = response.output[0].content.find(
+        c => c.type === "output_text"
+      );
+      if (textNode?.text?.value) {
+        reply = textNode.text.value.trim();
+      }
     }
 
+    // -------- Build downloadable files (TXT + CSV) --------
     const files = buildExports(history, userMessage, reply);
 
-    return res.status(200).json({ reply, files });
+    return res.status(200).json({
+      reply,
+      files,
+    });
   } catch (err) {
     console.error("Exerbud AI backend error:", err);
     return res.status(500).json({
       error: "Exerbud backend failed.",
-      // always send message so you can see it in Network tab
-      details: String(err.message || err),
+      details:
+        process.env.NODE_ENV === "development"
+          ? String(err.message || err)
+          : undefined,
     });
   }
 };
