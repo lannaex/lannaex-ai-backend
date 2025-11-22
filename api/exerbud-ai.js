@@ -22,11 +22,11 @@ Capabilities:
 - Build and adjust workout plans (gym, home, travel, limited equipment).
 - Suggest sustainable programming (not extreme).
 - Help with exercise selection, sets/reps, weekly splits, progression, deloads.
-- Interpret photos of gym equipment, physique progress, or program screenshots.
 - Use uploaded files as context:
-  - Images → you CAN see them. Always mention what you see and use it to tailor advice
-    (e.g., "In the photo I see a cable stack and dumbbells up to 25 kg…").
-  - Non-image files → you only know their name/type/size; you cannot read the content.
+  - You CANNOT literally see the file contents in this environment.
+  - You only know the file names, types, and approximate sizes.
+  - If the user says they uploaded a program, photos, or a gym layout,
+    ask them to describe key details in text and work from that.
 
 Limitations:
 - You do NOT have live internet or map access.
@@ -39,8 +39,6 @@ Limitations:
 
 Output style:
 - Start with 1–2 sentences reflecting what you understood.
-- If there are attachments, explicitly reference them in your first section
-  (e.g., "Based on the image you sent…").
 - Then give structured guidance with headings and bullet points.
 - End with 2–4 clear "Next steps" so the user knows exactly what to do.
   `.trim();
@@ -100,7 +98,7 @@ module.exports = async (req, res) => {
       ],
     }));
 
-  // ---------- Build current user content (text + attachments) ----------
+  // ---------- Build current user content (text + attachment summary) ----------
   const contentParts = [
     {
       type: "input_text",
@@ -108,48 +106,20 @@ module.exports = async (req, res) => {
     },
   ];
 
-  const nonImageSummaries = [];
-  const imageSummaries = [];
-
-  attachments.forEach((att, index) => {
-    if (!att || !att.data || !att.type) return;
-
-    const mime = String(att.type);
-    const name = String(att.name || `file-${index + 1}`);
-
-    if (mime.startsWith("image/")) {
-      // Image → vision input
-      contentParts.push({
-        type: "input_image",
-        image_url: {
-          url: `data:${mime};base64,${att.data}`,
-        },
-      });
-      imageSummaries.push(`${name} (${mime})`);
-    } else {
-      // Non-image → summarise only (model cannot see contents)
-      nonImageSummaries.push(
-        `${name} (${mime}, ~${Math.round((att.size || 0) / 1024)} KB)`
-      );
-    }
-  });
-
-  if (imageSummaries.length > 0) {
-    contentParts.push({
-      type: "input_text",
-      text:
-        "The user also attached these image files. You CAN see them and should reference what you see:\n" +
-        imageSummaries.map((s) => "- " + s).join("\n"),
+  if (attachments.length > 0) {
+    const fileSummaries = attachments.map((att, idx) => {
+      if (!att) return `file-${idx + 1}`;
+      const name = att.name || `file-${idx + 1}`;
+      const mime = att.type || "application/octet-stream";
+      const sizeKB = att.size ? `${Math.round(att.size / 1024)} KB` : "unknown size";
+      return `${name} (${mime}, ~${sizeKB})`;
     });
-  }
 
-  if (nonImageSummaries.length > 0) {
     contentParts.push({
       type: "input_text",
       text:
-        "The user also uploaded these non-image files. " +
-        "You cannot read their contents; treat them only as conceptual context:\n" +
-        nonImageSummaries.map((s) => "- " + s).join("\n"),
+        "The user also uploaded these files. You cannot see their contents; treat them only as conceptual context and ask the user to describe anything important in text:\n" +
+        fileSummaries.map((s) => "- " + s).join("\n"),
     });
   }
 
