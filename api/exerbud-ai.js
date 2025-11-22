@@ -15,37 +15,29 @@ Tone:
 
 You can:
 - Build and adjust workout plans (gym, home, travel, limited equipment).
-- Suggest sustainable, progressive programming (not extreme).
+- Suggest sustainable programming (not extreme).
 - Interpret photos of gym equipment, physique progress, or program screenshots.
 - Use uploaded files as context:
   - Images → analyze what you see.
   - Non-image files → reference by file name + metadata (you cannot read contents).
-
-Internet search (web tool):
-- When the user explicitly asks you to LOOK UP something in the real world
-  (e.g., "find gyms near me", "research this supplement", "compare membership prices",
-   "find studies on X"), you may use the web_search tool.
-- Use web search to:
-  - Find examples of gyms / equipment / classes in a location.
-  - Check typical membership ranges or equipment offerings.
-  - Pull up recent, reliable information about training concepts or studies.
-- Do NOT use search for things you can answer from general training knowledge.
+- Use web search when helpful (for example: finding general info about exercises,
+  basic gym chains in a city, typical membership ranges, or simple travel logistics).
+  - You CANNOT see the user’s exact location unless they tell you.
+  - For “near me” questions, ask for their city/area first.
 
 Safety:
 - Flag overtraining or unsafe patterns.
-- If something sounds medically serious → recommend seeking medical clearance
-  from a qualified professional.
+- If something sounds medically serious → recommend seeking medical clearance.
 
 Output style:
 - Start with what you understood (1–2 sentences).
 - Use structured bullets or simple sections.
 - End with 2–4 clear next steps.
-`.trim();
+  `.trim();
 }
 
 // Helper: build TXT + CSV from conversation
 function buildExports(history, userMessage, reply) {
-  // history: [{ role: 'user'|'assistant', content: string, ... }]
   const full = [
     ...history
       .filter(m => m && typeof m.content === "string" && m.role)
@@ -58,12 +50,12 @@ function buildExports(history, userMessage, reply) {
 
   // TXT
   const textLines = full.map(m => {
-    const roleLabel = m.role.toUpperCase();
+    const roleLabel = String(m.role || "").toUpperCase();
     return `${roleLabel}:\n${m.content}`;
   });
   const txtContent = textLines.join("\n\n------------------------\n\n");
 
-  // CSV
+  // CSV (role, content)
   const esc = (s) =>
     `"${String(s).replace(/"/g, '""').replace(/\n/g, "\\n").replace(/\r/g, "")}"`;
 
@@ -182,9 +174,10 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // -------- Call Responses API with web_search tool enabled --------
+    // -------- Call Responses API (with web search tool) --------
     const response = await client.responses.create({
-      model: "gpt-4.1-mini",
+      model: "gpt-4.1",
+      tools: [{ type: "web_search" }],
       input: [
         {
           role: "system",
@@ -195,9 +188,6 @@ module.exports = async (req, res) => {
           role: "user",
           content: contentParts,
         },
-      ],
-      tools: [
-        { type: "web_search" } // <— enables internet search when the model decides it's needed
       ],
       max_output_tokens: 900,
       temperature: 0.7,
