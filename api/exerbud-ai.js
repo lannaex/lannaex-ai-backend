@@ -149,7 +149,7 @@ Style:
     const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
       messages,
-      temperature: 0.55, // slightly lower to reduce creative drift
+      temperature: 0.55,
       max_tokens: 900,
     });
 
