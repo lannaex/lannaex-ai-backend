@@ -23,9 +23,9 @@ Capabilities:
 - Suggest sustainable programming (not extreme).
 - Help with exercise selection, sets/reps, weekly splits, progression, deloads.
 - Use uploaded files as context:
-  - You CANNOT literally see the file contents in this environment.
-  - You only know the file names, types, and approximate sizes.
-  - If the user says they uploaded a program, photos, or a gym layout,
+  - In this environment you CANNOT directly see file contents.
+  - You only know file names, types, and approximate sizes.
+  - If the user says they uploaded a program, photos, or gym layout,
     ask them to describe key details in text and work from that.
 
 Limitations:
@@ -86,26 +86,16 @@ module.exports = async (req, res) => {
 
     const systemPrompt = buildExerbudSystemPrompt();
 
-    // ---------- Convert history to Responses API format ----------
+    // ---------- Convert history to chat.completions format ----------
     const historyMessages = history
       .filter((h) => h && typeof h.content === "string")
       .map((h) => ({
         role: h.role === "assistant" ? "assistant" : "user",
-        content: [
-          {
-            type: "input_text",
-            text: h.content,
-          },
-        ],
+        content: h.content,
       }));
 
     // ---------- Build current user content (text + attachment summary) ----------
-    const contentParts = [
-      {
-        type: "input_text",
-        text: userMessage,
-      },
-    ];
+    let userContent = userMessage;
 
     if (attachments.length > 0) {
       const fileSummaries = attachments.map((att, idx) => {
@@ -116,66 +106,51 @@ module.exports = async (req, res) => {
         return `${name} (${mime}, ~${sizeKB})`;
       });
 
-      contentParts.push({
-        type: "input_text",
-        text:
-          "The user also uploaded these files. You cannot see their contents; " +
-          "treat them only as conceptual context and ask the user to describe anything important in text:\n" +
-          fileSummaries.map((s) => "- " + s).join("\n"),
-      });
+      userContent +=
+        "\n\n[Note to Exerbud: The user has uploaded files in the UI. " +
+        "You cannot see their contents here — you only know names/types/sizes. " +
+        "If needed, ask the user to describe the important parts in text. " +
+        "Uploaded files:\n" +
+        fileSummaries.map((s) => "- " + s).join("\n") +
+        "\n]";
     }
 
-    // ---------- Call OpenAI Responses API ----------
-    const response = await client.responses.create({
+    // ---------- Call Chat Completions API ----------
+    const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
-      input: [
-        {
-          role: "system",
-          content: [{ type: "input_text", text: systemPrompt }],
-        },
+      messages: [
+        { role: "system", content: systemPrompt },
         ...historyMessages,
-        {
-          role: "user",
-          content: contentParts,
-        },
+        { role: "user", content: userContent },
       ],
-      max_output_tokens: 900,
+      max_tokens: 900,
       temperature: 0.7,
     });
 
-    // ---------- Extract reply ----------
     let reply =
       "I’m not sure what to say yet — try asking again with a bit more detail about your training.";
 
     if (
-      response &&
-      Array.isArray(response.output) &&
-      response.output[0] &&
-      Array.isArray(response.output[0].content)
+      completion &&
+      Array.isArray(completion.choices) &&
+      completion.choices[0] &&
+      completion.choices[0].message &&
+      typeof completion.choices[0].message.content === "string"
     ) {
-      const textNode = response.output[0].content.find(
-        (c) => c.type === "output_text"
-      );
-      if (
-        textNode &&
-        textNode.text &&
-        typeof textNode.text.value === "string"
-      ) {
-        reply = textNode.text.value.trim();
-      }
+      reply = completion.choices[0].message.content.trim();
     }
 
     return res.status(200).json({ reply });
   } catch (err) {
     console.error("Exerbud AI backend error:", err);
 
-    // IMPORTANT: still return 200 so the frontend doesn't hit its generic error path
+    // Return 200 so the frontend doesn't show its generic error
     const safeMessage =
       "I hit an internal backend error and couldn't complete this request. " +
       (err && err.message ? `Details: ${err.message}` : "");
 
     return res.status(200).json({
-      reply: safeMessage || "I hit an internal error and couldn't respond properly.",
+      reply: safeMessage,
     });
   }
 };
