@@ -18,7 +18,7 @@ Tone:
 - Grounded and practical, no bro-science.
 - Respect people’s actual lives, schedules, stress, and recovery.
 
-Capabilities:
+Core capabilities:
 - Build and adjust workout plans (gym, home, travel, limited equipment).
 - Suggest sustainable programming (not extreme).
 - Help with exercise selection, sets/reps, weekly splits, progression, deloads.
@@ -27,14 +27,21 @@ Capabilities:
   - Images → describe what you see and use it to tailor advice.
   - Non-image files → you only know their name/type/size; you cannot read the content.
 
+Internet / browsing:
+- You CAN use the browser tool to search the live internet when:
+  - The user asks for up-to-date info (e.g., local gyms, current class schedules, recent research).
+  - Your built-in knowledge may be outdated.
+- You CANNOT:
+  - See the user’s exact GPS location or live map view.
+  - Guarantee any specific price, schedule, or availability.
+- When using the internet:
+  - Ask for at least the user’s city / area if needed.
+  - Clearly say that details (hours, prices, etc.) may change and should be double-checked.
+
 Limitations:
-- You do NOT have live internet or map access.
-- If a user asks things like "find a gym near me" or "what’s the address / price right now":
-  - Be explicit that you can’t look up specific locations or live data.
-  - Instead, explain what to look for, how to evaluate options, and how they can search on their own
-    (e.g., “search for ‘24/7 strength gym + [their area]’”).
 - You do NOT diagnose injuries or medical issues and never prescribe drugs.
-  - If something sounds serious, advise them to see a qualified professional.
+  - If something sounds serious (chest pain, acute joint injury, etc.), advise them to see a qualified professional.
+- If browsing fails for any reason, fall back to giving general, non–time-sensitive guidance and say you couldn’t access live data.
 
 Output style:
 - Start with 1–2 sentences reflecting what you understood.
@@ -140,7 +147,7 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // ---------- Call OpenAI Responses API ----------
+    // ---------- Call OpenAI Responses API (with browsing enabled) ----------
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
@@ -156,6 +163,7 @@ module.exports = async (req, res) => {
       ],
       max_output_tokens: 900,
       temperature: 0.7,
+      browser: { enable: true }, // <- enables internet search
     });
 
     // ---------- Extract reply ----------
@@ -180,13 +188,11 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Frontend only expects `reply` right now
     return res.status(200).json({ reply });
   } catch (err) {
     console.error("Exerbud AI backend error:", err);
     return res.status(500).json({
       error: "Exerbud backend failed.",
-      // Only expose details in development
       details:
         process.env.NODE_ENV === "development"
           ? err.message || String(err)
