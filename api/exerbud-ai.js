@@ -26,23 +26,16 @@ Capabilities:
 - Use uploaded files as context:
   - Images → describe what you see and use it to tailor advice.
   - Non-image files → you only know their name/type/size; you cannot read the content.
-
-Real web search:
-- You have access to a web_search tool.
-- Use web_search when the user explicitly asks for:
-  - local options (e.g., gyms near them, classes, facilities),
-  - current information (hours, schedules, prices, new guidelines),
-  - recent information where being up to date matters.
-- When doing a search:
-  - Include the location (city/area/country) in the query if the user provides it.
-  - If they say "near me" but did NOT specify a location in the conversation,
-    first ask them (once) for their city/area before searching.
-  - Make 1–3 focused searches rather than many broad ones.
-  - Summarize results clearly and avoid overwhelming lists.
+- Use live internet search via the \`web_search\` tool when helpful:
+  - e.g., checking typical equipment in a gym chain, finding example programs online,
+    or pulling up general info about exercises, guidelines, or locations.
+  - When returning search-based info, remind the user to double-check details
+    like opening hours, pricing, or exact addresses, since those can change.
 
 Limitations:
-- Do NOT diagnose injuries or medical issues or prescribe medications.
-- If something sounds serious, advise them to see a qualified professional.
+- You do NOT do formal medical diagnostics or prescribe drugs.
+- If something sounds like an injury or medically serious, clearly recommend
+  that they see a qualified professional or get medical clearance before training.
 
 Output style:
 - Start with 1–2 sentences reflecting what you understood.
@@ -150,7 +143,7 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // ---------- Call OpenAI Responses API with web_search tool ----------
+    // ---------- Call OpenAI Responses API WITH web_search tool ----------
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
       input: [
@@ -169,6 +162,7 @@ module.exports = async (req, res) => {
           type: "web_search",
         },
       ],
+      tool_choice: "auto", // let the model decide when to call search
       max_output_tokens: 900,
       temperature: 0.7,
     });
@@ -177,34 +171,35 @@ module.exports = async (req, res) => {
     let reply =
       "I’m not sure what to say yet — try asking again with a bit more detail about your training.";
 
-    if (response && Array.isArray(response.output)) {
-      // Find the first message-type output (there may also be web_search_call entries)
-      const messageItem = response.output.find(
-        (item) => item.type === "message" && Array.isArray(item.content)
+    if (
+      response &&
+      Array.isArray(response.output) &&
+      response.output[0] &&
+      Array.isArray(response.output[0].content)
+    ) {
+      const textNode = response.output[0].content.find(
+        (c) => c.type === "output_text"
       );
-
-      if (messageItem) {
-        const textNode = messageItem.content.find(
-          (c) => c.type === "output_text"
-        );
-        if (
-          textNode &&
-          textNode.text &&
-          typeof textNode.text.value === "string"
-        ) {
-          reply = textNode.text.value.trim();
-        }
+      if (textNode?.text?.value) {
+        reply = textNode.text.value.trim();
       }
     }
 
     return res.status(200).json({ reply });
   } catch (err) {
-    console.error("Exerbud AI backend error:", err);
+    // Log more detail to Vercel logs so you can see what's failing
+    console.error(
+      "Exerbud AI backend error:",
+      err?.response?.data || err?.message || err
+    );
+
     return res.status(500).json({
       error: "Exerbud backend failed.",
+      // If you want to surface the error to the UI for debugging,
+      // you can add a `reply` field here instead of hiding it.
       details:
         process.env.NODE_ENV === "development"
-          ? err.message || String(err)
+          ? err?.message || String(err)
           : undefined,
     });
   }
